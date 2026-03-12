@@ -1,0 +1,99 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+
+\title{Random Fourier Feature Augmentation in Neural Networks:\\
+An Empirical Study of Inductive Bias and Efficiency}
+\author{David Goh, Jialin (Lynn) Li, Viriyadhika Putra}
+\date{CSC2515 -- Project Proposal \\ February 23, 2026}
+
+\begin{document}
+\maketitle
+
+\section{Problem Definition and Motivation}
+
+Random Fourier Features (RFF) approximate shift-invariant kernels using randomized sinusoidal embeddings \cite{rahimi2007}. By mapping inputs into a randomized spectral feature space prior to learning, RFF introduce explicit structure that can act as an inductive bias. This project studies how Random Fourier Feature (RFF) augmentation affects the behavior of neural networks. In particular, we investigate when injecting structured spectral features into neural architectures improves parameter efficiency, stability, and generalization.
+
+Our central question is:
+
+\begin{quote}
+When does augmenting neural networks with structured spectral features improve learning?
+\end{quote}
+
+We hypothesize that RFF provides a useful inductive bias when the data-generating process exhibits smooth or low-frequency structure. To test this systematically, we generate synthetic regression datasets from Gaussian Processes with varying smoothness, allowing direct control over spectral decay. This controlled setting enables us to study how alignment between dataset structure and Fourier embeddings affects performance.
+
+\section{Datasets}
+
+We evaluate across two domains:
+
+\textbf{1. Synthetic Gaussian Process Regression}
+
+We generate data from a zero-mean Gaussian Process with a shift-invariant kernel. By varying kernel smoothness and lengthscale (e.g., using Matérn kernels with different smoothness parameters), we systematically control the functional regularity and spectral decay of the target.
+
+This allows us to simulate tasks ranging from:
+\begin{itemize}
+    \item Highly smooth, low-frequency dominated functions,
+    \item Moderately smooth functions,
+    \item Rough, higher-frequency functions.
+\end{itemize}
+
+Because Random Fourier Features approximate shift-invariant kernels via randomized spectral embeddings \cite{rahimi2007}, this synthetic setup provides a controlled environment for testing when spectral alignment improves learning efficiency.
+
+\textbf{2. MIT-BIH Arrhythmia Dataset}
+
+We also evaluate on ECG heartbeat classification using the PhysioNet MIT-BIH Arrhythmia dataset \cite{moody2001}. This real-world biomedical task involves high-dimensional, noisy temporal signals with complex spectral characteristics. It allows us to assess whether RFF augmentation remains beneficial beyond controlled synthetic settings.
+
+\section{Proposed Experiments}
+
+We include linear regression baselines to ensure that the synthetic tasks are not trivially approximated by linear models. Kernel hyperparameters are chosen so that linear methods perform poorly, isolating the role of nonlinear structure and spectral alignment. Across datasets, we compare:
+
+\begin{enumerate}
+    \item Standard multilayer perceptrons (MLPs),
+    \item RFF features followed by a small MLP.
+\end{enumerate}
+
+We systematically vary:
+\begin{itemize}
+    \item Trainable parameter budget,
+    \item RFF feature dimension
+    \item L2 regularization strength.
+\end{itemize}
+
+All experiments will be repeated across multiple random seeds. We report mean performance and standard deviation, ensuring strict train/validation/test separation and fair hyperparameter tuning.
+
+\section{Research Questions}
+
+\begin{enumerate}
+    \item How does RFF augmentation affect performance under fixed parameter budgets?
+    \item Does spectral feature injection improve sample efficiency for smoother data-generating processes?
+    \item How does RFF interact with regularization in finite-width neural networks?
+    \item Do benefits observed in controlled synthetic settings transfer to real-world biomedical signals?
+\end{enumerate}
+
+\section{Expected Contributions}
+
+This project provides a systematic empirical study of structured feature augmentation in neural networks. We aim to:
+
+\begin{itemize}
+    \item Quantify how RFF influences parameter efficiency across varying dataset smoothness,
+    \item Identify regimes where spectral inductive bias improves learning,
+    \item Clarify how RFF interacts with capacity and regularization in finite-width networks,
+    \item Provide practical guidance on when Random Fourier Feature augmentation is beneficial.
+\end{itemize}
+
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+
+\bibitem{rahimi2007}
+A. Rahimi and B. Recht.
+Random Features for Large-Scale Kernel Machines.
+NeurIPS, 2007.
+
+\bibitem{moody2001}
+G. Moody and R. Mark.
+The MIT-BIH Arrhythmia Database.
+PhysioNet, 2001.
+
+\end{thebibliography}
+
+\end{document}
