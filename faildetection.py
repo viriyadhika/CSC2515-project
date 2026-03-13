@@ -13,10 +13,20 @@ from sklearn.metrics import classification_report, confusion_matrix
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from torch.utils.data import Dataset, DataLoader
 
 from tqdm import tqdm
+
+from common.lib import (
+    EXCLUDED_RECORDS,
+    encode_label,
+    normalize_rows,
+    compute_metrics,
+    seed_everything,
+    SEED,
+    make_training_args,
+    extract_beats_and_rr,
+)
 
 # %%
 def denoise(signal):
@@ -42,84 +52,18 @@ from sklearn.model_selection import train_test_split
 
 window = 93
 
-
-def encode_label(l):
-
-    if l in ['N','L','R','e','j']:
-        return 0
-
-    elif l in ['A','a','J','S']:
-        return 1
-
-    elif l in ['V','E']:
-        return 2
-
-    elif l in ['F']:
-        return 3
-
-    elif l in ['/', 'f', 'Q']:
-        return 4
-
-    return None
-
-
-EXCLUDED_RECORDS = {"102", "104", "107", "217"}
-
-
-def normalize(X):
-    return (X - X.mean(axis=1, keepdims=True)) / X.std(axis=1, keepdims=True)
-
-
-def extract_beats(record_list, folder):
-
-    beats = []
-    labels = []
-
-    for r in record_list:
-
-        if r in EXCLUDED_RECORDS:
-            continue
-
-        path = f"{folder}/{r}"
-
-        record = wfdb.rdrecord(path)
-        annotation = wfdb.rdann(path, 'atr')
-
-        signal = record.p_signal[:,0]
-        peaks = annotation.sample
-        ann = annotation.symbol
-
-        for p,l in zip(peaks,ann):
-
-            encoded = encode_label(l)
-
-            if encoded is None:
-                continue
-
-            if p-window < 0 or p+window+1 > len(signal):
-                continue
-
-            beat = signal[p-window:p+window+1]
-
-            beats.append(beat)
-            labels.append(encoded)
-
-    return np.array(beats), np.array(labels)
-
 # %%
-records = [
-'100','101','102','103','104','105','106','107','108','109',
-'111','112','113','114','115','116','117','118','119','121',
-'122','123','124','200','201','202','203','205','207','208',
-'209','210','212','213','214','215','217','219','220','221',
-'222','223','228','230','231','232','233','234'
-]
 
 folder = "data/mit-bih-arrhythmia-database-1.0.0"
 
-X, y = extract_beats(records, folder)
+X, RR, y = extract_beats_and_rr(
+    folder,
+    denoise=False,
+    window=window,
+    record_list=records,
+)
 
-X = normalize(X)
+X = normalize_rows(X)
 
 print(X.shape, y.shape)
 
@@ -133,10 +77,7 @@ X_denoised = np.array(X_denoised)
 
 print("After denoising:", X_denoised.shape)
 
-def normalize(X):
-    return (X - X.mean(axis=1, keepdims=True)) / (X.std(axis=1, keepdims=True) + 1e-8)
-
-X_normalized = normalize(X_denoised)
+X_normalized = normalize_rows(X_denoised)
 
 print("After normalization:", X_normalized.shape)
 
@@ -278,33 +219,13 @@ optimizer = torch.optim.Adam(
 )
 
 # %%
-from transformers import TrainingArguments
-
-training_args = TrainingArguments(
+training_args = make_training_args(
     output_dir="./ecg_model",
-    per_device_train_batch_size=128,
-    per_device_eval_batch_size=128,
-    num_train_epochs=15,
-    learning_rate=1e-3,
-    logging_steps=50
+    epochs=15,
+    batch_size=128,
+    lr=1e-3,
+    seed=SEED,
 )
-
-
-from sklearn.metrics import accuracy_score, f1_score, balanced_accuracy_score, confusion_matrix
-
-def compute_metrics(eval_pred):
-
-    logits, labels = eval_pred
-
-    preds = logits.argmax(axis=1)
-
-    return {
-        "accuracy": accuracy_score(labels, preds),
-        "f1": f1_score(labels, preds, average="macro"),
-        "balanced": balanced_accuracy_score(labels, preds),
-        "labels": labels,
-        "preds": preds
-    }
 
 from transformers import Trainer
 
@@ -320,7 +241,6 @@ trainer = Trainer(
 trainer.train()
 metrics = trainer.evaluate()
 print(metrics)
-print(confusion_matrix(metrics["eval_labels"], metrics["eval_preds"]))
 
 
 predictions = trainer.predict(test_dataset)

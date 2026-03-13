@@ -140,8 +140,26 @@ def maybe_augment_noise(
 
 
 def extract_beats_and_rr(
-    folder: str, denoise: bool = True
+    folder: str,
+    denoise: bool = True,
+    *,
+    window: int = WINDOW,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Extract fixed-window beats and RR intervals from MIT-BIH-style ECG records.
+
+    Parameters
+    ----------
+    folder : str
+        Folder containing WFDB records.
+    denoise : bool, default True
+        If True, apply baseline removal and low-pass filtering.
+    window : int, default WINDOW
+        Half-window size in samples. Each beat has length 2 * window.
+    record_list : list[str] | None, default None
+        Optional explicit list of record IDs to use. If None, all .hea
+        records in the folder are used (excluding EXCLUDED_RECORDS).
+    """
     X, RR, y = [], [], []
     records = sorted(f[:-4] for f in os.listdir(folder) if f.endswith(".hea"))
 
@@ -168,8 +186,8 @@ def extract_beats_and_rr(
             if i == 0 or i == len(peaks) - 1:
                 continue
 
-            start = peak - WINDOW
-            end = peak + WINDOW
+            start = peak - window
+            end = peak + window
             if start < 0 or end > len(sig):
                 continue
 
@@ -177,7 +195,7 @@ def extract_beats_and_rr(
             post_rr = peaks[i + 1] - peaks[i]
 
             beat = sig[start:end]
-            if len(beat) != 2 * WINDOW:
+            if len(beat) != 2 * window:
                 continue
 
             X.append(beat)
