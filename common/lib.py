@@ -23,6 +23,7 @@ from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
 from transformers import TrainingArguments
+import pywt
 
 # ---------------------------------------------------------------------------
 # Constants / label mapping
