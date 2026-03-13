@@ -60,6 +60,7 @@ from common.lib import (
     ECGRRDataset,
     compute_metrics,
     percent_trained,
+    balance_classes,
 )
 
 
@@ -218,7 +219,17 @@ def run_single_split(X: np.ndarray, RR: np.ndarray, y: np.ndarray, args) -> None
     if args.use_noise_aug:
         X_train = maybe_augment_noise(X_train, args.nstdb_folder, args.snr_db)
 
+    # Subsample labeled training data if requested
     X_train, y_train = percent_trained(X_train, y_train, args)
+
+    # Rebalance training set only (valid/test keep real distribution)
+    X_train, y_train = balance_classes(
+        X_train,
+        y_train,
+        target_size=5000,
+        seed=SEED,
+        n_classes=5,
+    )
 
     train_dataset = ECGRRDataset(X_train, y_train)
     valid_dataset = ECGRRDataset(X_valid, y_valid)
@@ -275,7 +286,17 @@ def run_kfold(X: np.ndarray, RR: np.ndarray, y: np.ndarray, args) -> None:
         if args.use_noise_aug:
             X_train = maybe_augment_noise(X_train, args.nstdb_folder, args.snr_db)
 
+        # Subsample labeled training data if requested
         X_train, y_train = percent_trained(X_train, y_train, args)
+
+        # Rebalance training set only (valid/test keep real distribution)
+        X_train, y_train = balance_classes(
+            X_train,
+            y_train,
+            target_size=5000,
+            seed=SEED,
+            n_classes=5,
+        )
 
         train_dataset = ECGRRDataset(X_train, y_train)
         valid_dataset = ECGRRDataset(X_valid, y_valid)
