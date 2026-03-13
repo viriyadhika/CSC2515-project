@@ -59,6 +59,7 @@ from novel.mae_lib import (
     mae_collator,
     cls_collator,
     add_common_ecg_cli_args,
+    evaluate_knn_and_tsne_on_test,
 )
 
 class MAEReconstructionCallback(TrainerCallback):
@@ -475,7 +476,7 @@ def plot_attention_map(attn: torch.Tensor, save_path: str | None = None) -> None
 
 def main():
     parser = argparse.ArgumentParser()
-    add_common_ecg_cli_args(parser, output_dir_default="./tiny_ecg_mae_runs")
+    add_common_ecg_cli_args(parser, output_dir_default="./data/tiny_ecg_mae_runs")
 
     parser.add_argument("--mask_ratio", type=float, default=0.6)
     args = parser.parse_args()
@@ -538,6 +539,28 @@ def main():
         from safetensors.torch import load_file
         state_dict = load_file(args.checkpoint)
         mae_model.load_state_dict(state_dict)
+
+    # === Zero-shot KNN + t-SNE on test set ===
+    def _mae_get_embeddings(X_np: np.ndarray) -> np.ndarray:
+        mae_model.eval()
+        with torch.no_grad():
+            device = next(mae_model.parameters()).device
+            X_tensor = torch.tensor(X_np, dtype=torch.float32, device=device).unsqueeze(1)
+            tokens = mae_model.tokenize(X_tensor) + mae_model.pos
+            latent = mae_model.encoder(tokens)
+            latent = mae_model.encoder_norm(latent)
+            return latent.mean(dim=1).cpu().numpy()
+
+    evaluate_knn_and_tsne_on_test(
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        y_test=y_test,
+        get_embeddings=_mae_get_embeddings,
+        idx2cls=IDX2CLS,
+        output_dir=args.output_dir,
+        prefix="mae",
+    )
 
     print("\n=== Stage 2: classifier finetuning ===")
 

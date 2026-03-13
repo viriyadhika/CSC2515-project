@@ -35,7 +35,7 @@ from common.lib import (
     preprocess_beats,
     balance_classes,
 )
-from novel.mae_lib import cls_collator, add_common_ecg_cli_args
+from novel.mae_lib import cls_collator, add_common_ecg_cli_args, evaluate_knn_and_tsne_on_test
 
 
 class ECGEncoder(nn.Module):
@@ -299,7 +299,7 @@ def build_classifier_from_dino(
 
 def main():
     parser = argparse.ArgumentParser()
-    add_common_ecg_cli_args(parser, output_dir_default="./tiny_ecg_dino_runs")
+    add_common_ecg_cli_args(parser, output_dir_default="./data/tiny_ecg_dino_runs")
     parser.add_argument("--teacher_momentum", type=float, default=0.996)
     parser.add_argument("--seq_len", type=int, default=198)
     parser.add_argument("--patch_size", type=int, default=9)
@@ -370,6 +370,25 @@ def main():
 
         state_dict = load_file(args.checkpoint)
         dino_model.load_state_dict(state_dict)
+
+    # === Zero-shot KNN + t-SNE on test set ===
+    def _dino_get_embeddings(X_np: np.ndarray) -> np.ndarray:
+        dino_model.eval()
+        with torch.no_grad():
+            device = next(dino_model.parameters()).device
+            X_tensor = torch.tensor(X_np, dtype=torch.float32, device=device).unsqueeze(1)
+            return dino_model.student_backbone(X_tensor).cpu().numpy()
+
+    evaluate_knn_and_tsne_on_test(
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        y_test=y_test,
+        get_embeddings=_dino_get_embeddings,
+        idx2cls=IDX2CLS,
+        output_dir=args.output_dir,
+        prefix="dino",
+    )
 
     print("\n=== Stage 2: classifier finetuning ===")
 
