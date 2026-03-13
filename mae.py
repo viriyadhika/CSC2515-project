@@ -547,7 +547,7 @@ def main():
 
     print("\n=== Stage 2: classifier finetuning ===")
 
-    X_train, y_train, RR_train = percent_trained(X_train, y_train, RR_train, args)
+    X_train, y_train = percent_trained(X_train, y_train, args)
 
     class_counts = np.bincount(y_train, minlength=5).astype(np.float32)
     class_weights_np = class_counts.sum() / (len(class_counts) * class_counts + 1e-8)
@@ -558,9 +558,9 @@ def main():
         class_weights=class_weights if args.balanced_weight else None,
     )
 
-    train_dataset = ECGRRDataset(X_train, RR_train, y_train)
-    valid_dataset = ECGRRDataset(X_valid, RR_valid, y_valid)
-    test_dataset = ECGRRDataset(X_test, RR_test, y_test)
+    train_dataset = ECGRRDataset(X_train, y_train)
+    valid_dataset = ECGRRDataset(X_valid, y_valid)
+    test_dataset = ECGRRDataset(X_test, y_test)
 
     finetune_args = make_training_args(
         output_dir=str(Path(args.output_dir) / "finetune"),

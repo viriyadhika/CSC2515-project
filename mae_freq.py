@@ -619,8 +619,8 @@ def main():
     # ===== Stage 2: classifier finetuning (spectrogram TinyTransformer) =====
     print("\n=== Stage 2: spectrogram classifier finetuning ===")
 
-    X_train_ft, y_train_ft, RR_train_ft = percent_trained(
-        X_train, y_train, RR_train, args
+    X_train_ft, y_train_ft = percent_trained(
+        X_train, y_train, args
     )
 
     class_counts_ft = np.bincount(y_train_ft, minlength=5).astype(np.float32)
@@ -634,9 +634,9 @@ def main():
         class_weights=class_weights_ft if args.balanced_weight else None,
     )
 
-    train_dataset = ECGRRDataset(X_train_ft, RR_train_ft, y_train_ft)
-    valid_dataset = ECGRRDataset(X_valid, RR_valid, y_valid)
-    test_dataset = ECGRRDataset(X_test, RR_test, y_test)
+    train_dataset = ECGRRDataset(X_train_ft, y_train_ft)
+    valid_dataset = ECGRRDataset(X_valid, y_valid)
+    test_dataset = ECGRRDataset(X_test, y_test)
 
     finetune_args = make_training_args(
         output_dir=str(Path(args.output_dir) / "finetune"),

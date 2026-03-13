@@ -234,14 +234,14 @@ def preprocess_beats_and_balance(
     X: np.ndarray,
     y: np.ndarray,
     *,
-    target_size: int | None = None,
+    target_size: int | None = 5000,
     seed: int = SEED,
     n_classes: int = 5,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Common preprocessing used in experiments:
     - normalize each beat (row-wise)
-    - optional per-beat transform (e.g. wavelet denoise)
+    - wavelet denoise each beat
     - normalize again
     - optional class rebalancing by resampling to `target_size` per class
     """
@@ -276,9 +276,8 @@ def preprocess_beats_and_balance(
 
 
 class ECGRRDataset(Dataset):
-    def __init__(self, X: np.ndarray, rr: np.ndarray, y: np.ndarray):
+    def __init__(self, X: np.ndarray, y: np.ndarray):
         self.X = torch.tensor(X, dtype=torch.float32)
-        self.rr = torch.tensor(rr, dtype=torch.float32)
         self.y = torch.tensor(y, dtype=torch.long)
 
     def __len__(self):
@@ -287,7 +286,6 @@ class ECGRRDataset(Dataset):
     def __getitem__(self, idx):
         return {
             "x": self.X[idx].unsqueeze(0),
-            "rr": self.rr[idx],
             "labels": self.y[idx],
         }
 
@@ -304,13 +302,12 @@ def compute_metrics(eval_pred):
     }
 
 
-def percent_trained(X_train, y_train, RR_train, args):
+def percent_trained(X_train, y_train, args):
     if args.percent_train < 100.0:
         frac = args.percent_train / 100.0
 
-        X_train, _, RR_train, _, y_train, _ = train_test_split(
+        X_train, _, y_train, _ = train_test_split(
             X_train,
-            RR_train,
             y_train,
             train_size=frac,
             stratify=y_train,
@@ -319,8 +316,8 @@ def percent_trained(X_train, y_train, RR_train, args):
 
         print(f"Using {len(y_train)} labeled training beats ({args.percent_train}%)")
 
-        return X_train, y_train, RR_train
-    return X_train, y_train, RR_train
+        return X_train, y_train
+    return X_train, y_train
 
 
 def make_training_args(

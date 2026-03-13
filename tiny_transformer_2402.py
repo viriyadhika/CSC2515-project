@@ -189,13 +189,12 @@ def train_and_test_with_trainer(
     }
 
 
-def percent_trained(X_train, y_train, RR_train, args):
+def percent_trained(X_train, y_train, args):
     if args.percent_train < 100.0:
         frac = args.percent_train / 100.0
     
-        X_train, _, RR_train, _, y_train, _ = train_test_split(
+        X_train, _, y_train, _ = train_test_split(
             X_train,
-            RR_train,
             y_train,
             train_size=frac,
             stratify=y_train,
@@ -204,8 +203,8 @@ def percent_trained(X_train, y_train, RR_train, args):
     
         print(f"Using {len(y_train)} labeled training beats ({args.percent_train}%)")
 
-        return X_train, y_train, RR_train
-    return X_train, y_train, RR_train
+        return X_train, y_train
+    return X_train, y_train
 
 def run_single_split(X: np.ndarray, RR: np.ndarray, y: np.ndarray, args) -> None:
     # Paper-style 7:1:2 random intra-patient split
@@ -219,11 +218,11 @@ def run_single_split(X: np.ndarray, RR: np.ndarray, y: np.ndarray, args) -> None
     if args.use_noise_aug:
         X_train = maybe_augment_noise(X_train, args.nstdb_folder, args.snr_db)
 
-    X_train, y_train, RR_train = percent_trained(X_train, y_train, RR_train, args)
+    X_train, y_train = percent_trained(X_train, y_train, args)
 
-    train_dataset = ECGRRDataset(X_train, RR_train, y_train)
-    valid_dataset = ECGRRDataset(X_valid, RR_valid, y_valid)
-    test_dataset = ECGRRDataset(X_test, RR_test, y_test)
+    train_dataset = ECGRRDataset(X_train, y_train)
+    valid_dataset = ECGRRDataset(X_valid, y_valid)
+    test_dataset = ECGRRDataset(X_test, y_test)
 
     result = train_and_test_with_trainer(
         train_dataset=train_dataset,
@@ -276,11 +275,11 @@ def run_kfold(X: np.ndarray, RR: np.ndarray, y: np.ndarray, args) -> None:
         if args.use_noise_aug:
             X_train = maybe_augment_noise(X_train, args.nstdb_folder, args.snr_db)
 
-        X_train, y_train, RR_train = percent_trained(X_train, y_train, RR_train, args)
+        X_train, y_train = percent_trained(X_train, y_train, args)
 
-        train_dataset = ECGRRDataset(X_train, RR_train, y_train)
-        valid_dataset = ECGRRDataset(X_valid, RR_valid, y_valid)
-        test_dataset = ECGRRDataset(X_test, RR_test, y_test)
+        train_dataset = ECGRRDataset(X_train, y_train)
+        valid_dataset = ECGRRDataset(X_valid, y_valid)
+        test_dataset = ECGRRDataset(X_test, y_test)
 
         print(f"\n=== Fold {fold}/{args.folds} ===")
 
