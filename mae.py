@@ -474,6 +474,66 @@ def plot_attention_map(attn: torch.Tensor, save_path: str | None = None) -> None
     plt.show()
 
 
+def mae_pretrain_from_datasets(
+    train_dataset,
+    valid_dataset,
+    mae_model: nn.Module,
+    training_args: TrainingArguments,
+    reconstruction_callback: TrainerCallback | None = None,
+):
+    """
+    Generic MAE pretraining that only depends on datasets.
+
+    Each dataset item is expected to include a key "x" with a tensor
+    shaped for the MAE encoder (e.g., [1, L] for 1D signals).
+    """
+    callbacks = []
+    if reconstruction_callback is not None:
+        callbacks.append(reconstruction_callback)
+
+    trainer = Trainer(
+        model=mae_model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=valid_dataset,
+        data_collator=mae_collator,
+        callbacks=callbacks or None,
+    )
+    trainer.train()
+    return trainer
+
+
+def mae_finetune_from_datasets(
+    clf_model: nn.Module,
+    train_dataset,
+    valid_dataset,
+    test_dataset,
+    training_args: TrainingArguments,
+    data_collator=cls_collator,
+    compute_metrics_fn=compute_metrics,
+):
+    """
+    Generic classifier finetuning.
+
+    Datasets are expected to return a dict with keys "x" and "labels".
+    This works for ECG, audio, or any 1D signal as long as shapes match
+    the classifier.
+    """
+    clf_trainer = Trainer(
+        model=clf_model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=valid_dataset,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics_fn,
+    )
+    clf_trainer.train()
+
+    val_metrics = clf_trainer.evaluate()
+    test_metrics = clf_trainer.evaluate(eval_dataset=test_dataset)
+    return clf_trainer, val_metrics, test_metrics
+
+
 def main():
     parser = argparse.ArgumentParser()
     add_common_ecg_cli_args(parser, output_dir_default="./data/tiny_ecg_mae_runs")
@@ -518,21 +578,17 @@ def main():
     mae_args.greater_is_better = False
 
     if args.checkpoint == None:
-        mae_trainer = Trainer(
-            model=mae_model,
-            args=mae_args,
+        mae_trainer = mae_pretrain_from_datasets(
             train_dataset=mae_train_dataset,
-            eval_dataset=mae_valid_dataset,
-            data_collator=mae_collator,
-            callbacks=[
-            MAEReconstructionCallback(
+            valid_dataset=mae_valid_dataset,
+            mae_model=mae_model,
+            training_args=mae_args,
+            reconstruction_callback=MAEReconstructionCallback(
                 val_dataset=mae_valid_dataset,
                 model=mae_model,
-                save_dir="./tiny_ecg_mae_runs/reconstruction"
-            )
-        ],
+                save_dir="./tiny_ecg_mae_runs/reconstruction",
+            ),
         )
-        mae_trainer.train()
         print("MAE validation:")
         print(mae_trainer.evaluate())
     else:
@@ -598,22 +654,18 @@ def main():
     finetune_args.metric_for_best_model = "macro_f1"
     finetune_args.greater_is_better = True
 
-    clf_trainer = Trainer(
-        model=clf_model,
-        args=finetune_args,
+    clf_trainer, val_metrics, test_metrics = mae_finetune_from_datasets(
+        clf_model=clf_model,
         train_dataset=train_dataset,
-        eval_dataset=valid_dataset,
-        data_collator=cls_collator,
-        compute_metrics=compute_metrics,
+        valid_dataset=valid_dataset,
+        test_dataset=test_dataset,
+        training_args=finetune_args,
     )
-    clf_trainer.train()
 
     print("Validation metrics:")
-    val_metrics = clf_trainer.evaluate()
     print(val_metrics)
 
     print("Test metrics:")
-    test_metrics = clf_trainer.evaluate(eval_dataset=test_dataset)
     print(test_metrics)
 
     pred_output = clf_trainer.predict(test_dataset)

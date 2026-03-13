@@ -526,6 +526,58 @@ class TinyTransformerMAEFinetuneFreq(nn.Module):
         return {"loss": loss, "logits": logits}
 
 
+def mae_freq_pretrain_from_datasets(
+    train_dataset,
+    valid_dataset,
+    mae_model: nn.Module,
+    training_args: TrainingArguments,
+):
+    """
+    Generic spectrogram-MAE pretraining that only depends on datasets.
+
+    Each dataset item is expected to include a key "x" with a 1D signal
+    that the model internally converts to a spectrogram.
+    """
+    trainer = Trainer(
+        model=mae_model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=valid_dataset,
+        data_collator=mae_collator,
+    )
+    trainer.train()
+    return trainer
+
+
+def mae_freq_finetune_from_datasets(
+    clf_model: nn.Module,
+    train_dataset,
+    valid_dataset,
+    test_dataset,
+    training_args: TrainingArguments,
+    data_collator=cls_collator,
+    compute_metrics_fn=compute_metrics,
+):
+    """
+    Generic classifier finetuning for spectrogram encoder.
+
+    Datasets are expected to return a dict with keys "x" and "labels".
+    """
+    clf_trainer = Trainer(
+        model=clf_model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=valid_dataset,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics_fn,
+    )
+    clf_trainer.train()
+
+    val_metrics = clf_trainer.evaluate()
+    test_metrics = clf_trainer.evaluate(eval_dataset=test_dataset)
+    return clf_trainer, val_metrics, test_metrics
+
+
 def main():
     parser = argparse.ArgumentParser()
     add_common_ecg_cli_args(parser, output_dir_default="./tiny_ecg_mae_freq_runs")
@@ -594,14 +646,12 @@ def main():
     mae_args.greater_is_better = False
 
     if args.checkpoint is None:
-        mae_trainer = Trainer(
-            model=mae_model,
-            args=mae_args,
+        mae_trainer = mae_freq_pretrain_from_datasets(
             train_dataset=mae_train_dataset,
-            eval_dataset=mae_valid_dataset,
-            data_collator=mae_collator,
+            valid_dataset=mae_valid_dataset,
+            mae_model=mae_model,
+            training_args=mae_args,
         )
-        mae_trainer.train()
 
         print("Spectrogram MAE validation:")
         print(mae_trainer.evaluate())
@@ -652,22 +702,18 @@ def main():
     finetune_args.metric_for_best_model = "macro_f1"
     finetune_args.greater_is_better = True
 
-    clf_trainer = Trainer(
-        model=clf_model,
-        args=finetune_args,
+    clf_trainer, val_metrics, test_metrics = mae_freq_finetune_from_datasets(
+        clf_model=clf_model,
         train_dataset=train_dataset,
-        eval_dataset=valid_dataset,
-        data_collator=cls_collator,
-        compute_metrics=compute_metrics,
+        valid_dataset=valid_dataset,
+        test_dataset=test_dataset,
+        training_args=finetune_args,
     )
-    clf_trainer.train()
 
     print("Validation metrics:")
-    val_metrics = clf_trainer.evaluate()
     print(val_metrics)
 
     print("Test metrics:")
-    test_metrics = clf_trainer.evaluate(eval_dataset=test_dataset)
     print(test_metrics)
 
     pred_output = clf_trainer.predict(test_dataset)

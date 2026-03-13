@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split
-from transformers import Trainer, TrainerCallback
+from transformers import Trainer, TrainerCallback, TrainingArguments
 
 from common.lib import (
     SEED,
@@ -297,6 +297,62 @@ def build_classifier_from_dino(
     return model
 
 
+def dino_pretrain_from_datasets(
+    train_dataset,
+    valid_dataset,
+    dino_model: nn.Module,
+    training_args: TrainingArguments,
+    teacher_momentum: float = 0.996,
+):
+    """
+    Generic DINO pretraining that only depends on datasets.
+
+    Each dataset item is expected to return two augmented views, with
+    keys "x1" and "x2". This works for ECG, audio, or other 1D signals.
+    """
+    dino_trainer = Trainer(
+        model=dino_model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=valid_dataset,
+        data_collator=dino_collator,
+        callbacks=[
+            DINOTeacherUpdateCallback(momentum=teacher_momentum),
+        ],
+    )
+    dino_trainer.train()
+    return dino_trainer
+
+
+def dino_finetune_from_datasets(
+    clf_model: nn.Module,
+    train_dataset,
+    valid_dataset,
+    test_dataset,
+    training_args: TrainingArguments,
+    data_collator=cls_collator,
+    compute_metrics_fn=compute_metrics,
+):
+    """
+    Generic classifier finetuning for a DINO-initialized backbone.
+
+    Datasets are expected to return a dict with keys "x" and "labels".
+    """
+    clf_trainer = Trainer(
+        model=clf_model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=valid_dataset,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics_fn,
+    )
+    clf_trainer.train()
+
+    val_metrics = clf_trainer.evaluate()
+    test_metrics = clf_trainer.evaluate(eval_dataset=test_dataset)
+    return clf_trainer, val_metrics, test_metrics
+
+
 def main():
     parser = argparse.ArgumentParser()
     add_common_ecg_cli_args(parser, output_dir_default="./data/tiny_ecg_dino_runs")
@@ -352,18 +408,13 @@ def main():
         pretrain_args.load_best_model_at_end = False
         pretrain_args.metric_for_best_model = None
 
-        dino_trainer = Trainer(
-            model=dino_model,
-            args=pretrain_args,
+        dino_trainer = dino_pretrain_from_datasets(
             train_dataset=dino_train_dataset,
-            eval_dataset=dino_valid_dataset,
-            data_collator=dino_collator,
-            callbacks=[
-                DINOTeacherUpdateCallback(momentum=args.teacher_momentum),
-                DINOFeatureStdCallback(X_train=X_train, n_samples=2000, interval=10),
-            ],
+            valid_dataset=dino_valid_dataset,
+            dino_model=dino_model,
+            training_args=pretrain_args,
+            teacher_momentum=args.teacher_momentum,
         )
-        dino_trainer.train()
         print("DINO validation:", dino_trainer.evaluate())
     else:
         from safetensors.torch import load_file
@@ -429,18 +480,16 @@ def main():
     finetune_args.metric_for_best_model = "macro_f1"
     finetune_args.greater_is_better = True
 
-    clf_trainer = Trainer(
-        model=clf_model,
-        args=finetune_args,
+    clf_trainer, val_metrics, test_metrics = dino_finetune_from_datasets(
+        clf_model=clf_model,
         train_dataset=train_dataset,
-        eval_dataset=valid_dataset,
-        data_collator=cls_collator,
-        compute_metrics=compute_metrics,
+        valid_dataset=valid_dataset,
+        test_dataset=test_dataset,
+        training_args=finetune_args,
     )
-    clf_trainer.train()
 
-    print("Validation metrics:", clf_trainer.evaluate())
-    print("Test metrics:", clf_trainer.evaluate(eval_dataset=test_dataset))
+    print("Validation metrics:", val_metrics)
+    print("Test metrics:", test_metrics)
 
     pred_output = clf_trainer.predict(test_dataset)
     y_pred = np.argmax(pred_output.predictions, axis=1)

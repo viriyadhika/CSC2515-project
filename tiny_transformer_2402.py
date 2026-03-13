@@ -85,7 +85,7 @@ class TinyTransformer2402(nn.Module):
 
         self.final_norm = nn.LayerNorm(16)
         self.rr_proj = nn.Linear(2, 2)
-        self.head = nn.Linear(18, n_classes)
+        self.head = nn.Linear(16, n_classes)
         self.loss_fn = nn.CrossEntropyLoss()
 
     def forward(self, x=None, rr=None, labels=None):
@@ -95,8 +95,8 @@ class TinyTransformer2402(nn.Module):
         x = self.final_norm(x)
         x = x.mean(dim=1)                             # [B, 16]
 
-        rr = self.rr_proj(rr)                         # [B, 2]
-        x = torch.cat([x, rr], dim=1)                 # [B, 17]
+        # rr = self.rr_proj(rr)                         # [B, 2]
+        # x = torch.cat([x, rr], dim=1)                 # [B, 17]
 
         logits = self.head(x)
 
@@ -109,9 +109,9 @@ class TinyTransformer2402(nn.Module):
 
 def data_collator(features):
     x = torch.stack([f["x"] for f in features])
-    rr = torch.stack([f["rr"] for f in features])
+    # rr = torch.stack(["f["rr""] for f in features])
     labels = torch.tensor([int(f["labels"]) for f in features], dtype=torch.long)
-    return {"x": x, "rr": rr, "labels": labels}
+    return {"x": x, "labels": labels}
 
 
 def make_training_args(
@@ -333,7 +333,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--folder", type=str, default="data/mit-bih-arrhythmia-database-1.0.0")
     parser.add_argument("--nstdb_folder", type=str, default=None)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--use_noise_aug", action="store_true")
