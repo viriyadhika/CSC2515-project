@@ -35,19 +35,14 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
 )
-from sklearn.model_selection import train_test_split
 from transformers import Trainer, TrainerCallback, TrainingArguments
 import matplotlib.pyplot as plt
 
+from common.dataloader import ECGLoader, AudioLoader
 from common.lib import (
     SEED,
-    FS,
-    WINDOW,
     IDX2CLS,
     seed_everything,
-    maybe_augment_noise,
-    extract_beats_and_rr,
-    preprocess_beats,
     balance_classes,
     ECGRRDataset,
     compute_metrics,
@@ -150,7 +145,8 @@ class MAEReconstructionCallback(TrainerCallback):
         if epoch % self.interval != 0:
             return
 
-        idx = np.random.choice(len(self.val_dataset), self.num_samples, replace=False)
+        n_samples = min(len(self.val_dataset), self.num_samples)
+        idx = np.random.choice(len(self.val_dataset), n_samples, replace=False)
 
         xs = [self.val_dataset[i]["x"] for i in idx]
 
@@ -534,38 +530,76 @@ def mae_finetune_from_datasets(
     return clf_trainer, val_metrics, test_metrics
 
 
+def add_dataset_cli_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=["ecg", "esc50"],
+        default="ecg",
+        help="Dataset to use for MAE pretraining and finetuning.",
+    )
+    parser.add_argument(
+        "--seq_len",
+        type=int,
+        default=None,
+        help="Override input sequence length for the MAE model.",
+    )
+    parser.add_argument(
+        "--patch_size",
+        type=int,
+        default=None,
+        help="Override tokenizer patch size for the MAE model.",
+    )
+    parser.add_argument(
+        "--balance_target_size",
+        type=int,
+        default=None,
+        help="Optional per-class resampling target for the finetuning train split.",
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     add_common_ecg_cli_args(parser, output_dir_default="./data/tiny_ecg_mae_runs")
+    add_dataset_cli_args(parser)
 
     parser.add_argument("--mask_ratio", type=float, default=0.6)
     args = parser.parse_args()
 
     seed_everything(SEED)
 
-    X, RR, y = extract_beats_and_rr(args.folder, pre_process=None)
-    X = preprocess_beats(X)
+    dataset_loader = ECGLoader(args) if args.dataset == "ecg" else AudioLoader(args)
+    dataset = dataset_loader.load()
+    X_train = dataset["X_train"]
+    X_valid = dataset["X_valid"]
+    X_test = dataset["X_test"]
+    y_train = dataset["y_train"]
+    y_valid = dataset["y_valid"]
+    y_test = dataset["y_test"]
+    label_names = dataset["label_names"]
+    n_classes = int(dataset["n_classes"])
+    dataset_name = str(dataset["dataset_name"])
+    seq_len = int(dataset["seq_len"])
+    patch_size = int(dataset["patch_size"])
 
-    print(f"Loaded beats: {len(y)}")
-    class_counts = {IDX2CLS[i]: int((y == i).sum()) for i in range(5)}
-    print("Class counts:", class_counts)
-
-    # Same 7:1:2 split as TinyTransformer
-    X_train, X_tmp, y_train, y_tmp = train_test_split(
-        X, y, test_size=0.30, stratify=y, random_state=SEED
-    )
-    X_valid, X_test, y_valid, y_test = train_test_split(
-        X_tmp, y_tmp, test_size=2 / 3, stratify=y_tmp, random_state=SEED
-    )
-
-    if args.use_noise_aug:
-        X_train = maybe_augment_noise(X_train, args.nstdb_folder, args.snr_db)
+    if seq_len != X_train.shape[1]:
+        raise ValueError(
+            f"Resolved seq_len={seq_len} does not match loaded signal length={X_train.shape[1]}"
+        )
+    if patch_size <= 0 or patch_size > seq_len:
+        raise ValueError(
+            f"Invalid patch_size={patch_size} for seq_len={seq_len}"
+        )
 
     mae_train_dataset = ECGMAEDataset(X_train)
     mae_valid_dataset = ECGMAEDataset(X_valid)
 
     print("\n=== Stage 1: MAE pretraining ===")
-    mae_model = ECGMAE(mask_ratio=args.mask_ratio)
+    mae_model = ECGMAE(
+        seq_len=seq_len,
+        patch_size=patch_size,
+        mask_ratio=args.mask_ratio,
+    )
 
     mae_args = make_training_args(
         output_dir=str(Path(args.output_dir) / "mae_pretrain"),
@@ -586,7 +620,7 @@ def main():
             reconstruction_callback=MAEReconstructionCallback(
                 val_dataset=mae_valid_dataset,
                 model=mae_model,
-                save_dir="./tiny_ecg_mae_runs/reconstruction",
+                save_dir=str(Path(args.output_dir) / "reconstruction"),
             ),
         )
         print("MAE validation:")
@@ -607,36 +641,42 @@ def main():
             latent = mae_model.encoder_norm(latent)
             return latent.mean(dim=1).cpu().numpy()
 
-    evaluate_knn_and_tsne_on_test(
-        X_train=X_train,
-        y_train=y_train,
-        X_test=X_test,
-        y_test=y_test,
-        get_embeddings=_mae_get_embeddings,
-        idx2cls=IDX2CLS,
-        output_dir=args.output_dir,
-        prefix="mae",
-    )
+    if dataset_name == "ecg":
+        evaluate_knn_and_tsne_on_test(
+            X_train=X_train,
+            y_train=y_train,
+            X_test=X_test,
+            y_test=y_test,
+            get_embeddings=_mae_get_embeddings,
+            idx2cls=IDX2CLS,
+            output_dir=args.output_dir,
+            prefix="mae",
+        )
+    else:
+        print("Skipping ECG-specific KNN/t-SNE evaluation for ESC-50.")
 
     print("\n=== Stage 2: classifier finetuning ===")
 
     X_train, y_train = percent_trained(X_train, y_train, args)
 
-    # Rebalance only the training set
-    X_train, y_train = balance_classes(
-        X_train,
-        y_train,
-        target_size=5000,
-        seed=SEED,
-        n_classes=5,
-    )
+    balance_target_size = args.balance_target_size
+    if balance_target_size is None and dataset_name == "ecg":
+        balance_target_size = 5000
+    if balance_target_size is not None:
+        X_train, y_train = balance_classes(
+            X_train,
+            y_train,
+            target_size=balance_target_size,
+            seed=SEED,
+            n_classes=n_classes,
+        )
 
-    class_counts = np.bincount(y_train, minlength=5).astype(np.float32)
+    class_counts = np.bincount(y_train, minlength=n_classes).astype(np.float32)
     class_weights_np = class_counts.sum() / (len(class_counts) * class_counts + 1e-8)
     class_weights = torch.tensor(class_weights_np, dtype=torch.float32)
 
     clf_model = mae_model.build_classifier(
-        n_classes=len(class_counts),
+        n_classes=n_classes,
         class_weights=class_weights if args.balanced_weight else None,
     )
 
@@ -672,18 +712,17 @@ def main():
     y_pred = np.argmax(pred_output.predictions, axis=1)
     y_true = pred_output.label_ids
 
-    print(classification_report(
-        y_true,
-        y_pred,
-        labels=[0, 1, 2, 3, 4],
-        target_names=[IDX2CLS[i] for i in range(5)],
-        zero_division=0,
-    ))
-    print(confusion_matrix(
-        y_true,
-        y_pred,
-        labels=[0, 1, 2, 3, 4],
-    ))
+    label_ids = list(range(n_classes))
+    print(
+        classification_report(
+            y_true,
+            y_pred,
+            labels=label_ids,
+            target_names=label_names,
+            zero_division=0,
+        )
+    )
+    print(confusion_matrix(y_true, y_pred, labels=label_ids))
 
 
 if __name__ == "__main__":

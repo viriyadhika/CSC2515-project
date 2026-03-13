@@ -138,7 +138,7 @@ class ESC50(object):
         self.n_classes = 50
 
         self.df = pd.read_csv(self.csv_path)
-        self.df[self.df.fold.isin(folds)]
+        self.df = self.df[self.df.fold.isin(folds)].copy()
         if only_ESC10 is True:
             self.df = self.df[self.df['esc10']] 
             self.n_classes = 10

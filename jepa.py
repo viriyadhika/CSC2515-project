@@ -22,18 +22,13 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
 )
-from sklearn.model_selection import train_test_split
 from transformers import Trainer, TrainingArguments
 
+from common.dataloader import ECGLoader
 from common.lib import (
     SEED,
-    FS,
-    WINDOW,
     IDX2CLS,
     seed_everything,
-    maybe_augment_noise,
-    extract_beats_and_rr,
-    preprocess_beats,
     balance_classes,
     ECGRRDataset,
     compute_metrics,
@@ -305,24 +300,13 @@ def main():
 
     seed_everything(SEED)
 
-    # Shared beat + RR extraction, then JEPA-specific preprocessing
-    X, RR, y = extract_beats_and_rr(args.folder, pre_process=None)
-    X = preprocess_beats(X)
-
-    print(f"Loaded beats: {len(y)}")
-    class_counts = {IDX2CLS[i]: int((y == i).sum()) for i in range(5)}
-    print("Class counts:", class_counts)
-
-    # 7:1:2 split (same as TinyTransformer / MAE / DINO scripts)
-    X_train, X_tmp, y_train, y_tmp = train_test_split(
-        X, y, test_size=0.30, stratify=y, random_state=SEED
-    )
-    X_valid, X_test, y_valid, y_test = train_test_split(
-        X_tmp, y_tmp, test_size=2 / 3, stratify=y_tmp, random_state=SEED
-    )
-
-    if args.use_noise_aug:
-        X_train = maybe_augment_noise(X_train, args.nstdb_folder, args.snr_db)
+    dataset = ECGLoader(args).load()
+    X_train = dataset["X_train"]
+    X_valid = dataset["X_valid"]
+    X_test = dataset["X_test"]
+    y_train = dataset["y_train"]
+    y_valid = dataset["y_valid"]
+    y_test = dataset["y_test"]
 
     jepa_train_dataset = ECGMAEDataset(X_train)
     jepa_valid_dataset = ECGMAEDataset(X_valid)
@@ -452,4 +436,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

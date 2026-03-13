@@ -42,6 +42,7 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import Dataset
 from transformers import Trainer, TrainingArguments
 
+from common.dataloader import ECGLoader
 from common.lib import (
     SEED,
     FS,
@@ -350,12 +351,15 @@ def main():
 
     seed_everything(SEED)
 
-    X, RR, y = extract_beats_and_rr(args.folder, pre_process=low_pass_filter)
-    X = normalize_rows(X)
-
-    print(f"Loaded beats: {len(y)}")
-    class_counts = {IDX2CLS[i]: int((y == i).sum()) for i in range(5)}
-    print("Class counts:", class_counts)
+    full_data = ECGLoader(
+        args,
+        pre_process=low_pass_filter,
+        post_process=normalize_rows,
+        include_rr=True,
+    ).load_full()
+    X = full_data["X"]
+    RR = full_data["RR"]
+    y = full_data["y"]
 
     if args.folds > 1:
         run_kfold(X, RR, y, args)

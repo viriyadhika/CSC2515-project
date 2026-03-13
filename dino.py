@@ -19,20 +19,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.model_selection import train_test_split
 from transformers import Trainer, TrainerCallback, TrainingArguments
 
+from common.dataloader import ECGLoader
 from common.lib import (
     SEED,
     IDX2CLS,
     seed_everything,
-    extract_beats_and_rr,
-    maybe_augment_noise,
     ECGRRDataset,
     make_training_args,
     compute_metrics,
     percent_trained,
-    preprocess_beats,
     balance_classes,
 )
 from novel.mae_lib import cls_collator, add_common_ecg_cli_args, evaluate_knn_and_tsne_on_test
@@ -367,22 +364,13 @@ def main():
 
     seed_everything(SEED)
 
-    X, RR, y = extract_beats_and_rr(args.folder, pre_process=None)
-    X = preprocess_beats(X)
-
-    print(f"Loaded beats: {len(y)}")
-    class_counts = {IDX2CLS[i]: int((y == i).sum()) for i in range(5)}
-    print("Class counts:", class_counts)
-
-    X_train, X_tmp, y_train, y_tmp = train_test_split(
-        X, y, test_size=0.30, stratify=y, random_state=SEED
-    )
-    X_valid, X_test, y_valid, y_test = train_test_split(
-        X_tmp, y_tmp, test_size=2 / 3, stratify=y_tmp, random_state=SEED
-    )
-
-    if args.use_noise_aug:
-        X_train = maybe_augment_noise(X_train, args.nstdb_folder, args.snr_db)
+    dataset = ECGLoader(args).load()
+    X_train = dataset["X_train"]
+    X_valid = dataset["X_valid"]
+    X_test = dataset["X_test"]
+    y_train = dataset["y_train"]
+    y_valid = dataset["y_valid"]
+    y_test = dataset["y_test"]
 
     dino_train_dataset = ECGDINODataset(X_train)
     dino_valid_dataset = ECGDINODataset(X_valid)
