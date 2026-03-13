@@ -28,10 +28,6 @@ from common.lib import (
 
 # %%
 
-# %%
-import numpy as np
-from sklearn.model_selection import train_test_split
-
 window = 93
 
 # %%
@@ -47,27 +43,34 @@ X, RR, y = extract_beats_and_rr(
 print(X.shape, y.shape)
 
 X = preprocess_beats(X)
-X, y = balance_classes(X, y, target_size=5000, seed=SEED, n_classes=5)
+print("After shared preprocessing:", X.shape)
 
-print("Balanced dataset:", X.shape)
-
-# %%
-X = torch.tensor(X, dtype=torch.float32)
-y = torch.tensor(y, dtype=torch.long)
-
-# add channel dimension for Conv1D
-X = X.unsqueeze(1)
-
-print(X.shape)
-
-# %%
-X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.2,
-    stratify=y,
-    random_state=42
+# 7:1:2 stratified split, matching mae/dino/mae_freq
+X_train, X_tmp, y_train, y_tmp = train_test_split(
+    X, y, test_size=0.30, stratify=y, random_state=SEED
 )
+X_valid, X_test, y_valid, y_test = train_test_split(
+    X_tmp, y_tmp, test_size=2 / 3, stratify=y_tmp, random_state=SEED
+)
+
+# Rebalance training set only; valid/test keep real distribution
+X_train, y_train = balance_classes(
+    X_train, y_train, target_size=5000, seed=SEED, n_classes=5
+)
+
+print("Train set after balancing:", X_train.shape)
+print("Valid set:", X_valid.shape)
+print("Test set:", X_test.shape)
+
+# Convert to tensors and add channel dim [B, 1, L]
+X_train = torch.tensor(X_train, dtype=torch.float32).unsqueeze(1)
+y_train = torch.tensor(y_train, dtype=torch.long)
+
+X_valid = torch.tensor(X_valid, dtype=torch.float32).unsqueeze(1)
+y_valid = torch.tensor(y_valid, dtype=torch.long)
+
+X_test = torch.tensor(X_test, dtype=torch.float32).unsqueeze(1)
+y_test = torch.tensor(y_test, dtype=torch.long)
 
 # %%
 class ECGDataset(Dataset):
@@ -86,20 +89,9 @@ class ECGDataset(Dataset):
             "labels": self.y[idx]
         }
 
-# %%
 train_dataset = ECGDataset(X_train, y_train)
+valid_dataset = ECGDataset(X_valid, y_valid)
 test_dataset = ECGDataset(X_test, y_test)
-
-train_loader = DataLoader(
-    train_dataset,
-    batch_size=128,
-    shuffle=True
-)
-
-test_loader = DataLoader(
-    test_dataset,
-    batch_size=128
-)
 
 # %%
 import torch.nn.functional as F
@@ -166,15 +158,19 @@ trainer = Trainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
-    eval_dataset=test_dataset,
-    compute_metrics=compute_metrics
+    eval_dataset=valid_dataset,
+    compute_metrics=compute_metrics,
 )
 
 # %%
 trainer.train()
-metrics = trainer.evaluate()
-print(metrics)
+print("Validation metrics:")
+val_metrics = trainer.evaluate()
+print(val_metrics)
 
+print("Test metrics:")
+test_metrics = trainer.evaluate(eval_dataset=test_dataset)
+print(test_metrics)
 
 predictions = trainer.predict(test_dataset)
 
