@@ -2,3 +2,4 @@ data/
 .cursor
 .mypy_cache
 __pycache__
+.venv
