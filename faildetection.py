@@ -22,7 +22,8 @@ from common.lib import (
     SEED,
     make_training_args,
     extract_beats_and_rr,
-    preprocess_beats_and_balance,
+    preprocess_beats,
+    balance_classes,
 )
 
 # %%
@@ -45,13 +46,8 @@ X, RR, y = extract_beats_and_rr(
 
 print(X.shape, y.shape)
 
-X, y = preprocess_beats_and_balance(
-    X,
-    y,
-    target_size=5000,
-    seed=SEED,
-    n_classes=5,
-)
+X = preprocess_beats(X)
+X, y = balance_classes(X, y, target_size=5000, seed=SEED, n_classes=5)
 
 print("Balanced dataset:", X.shape)
 

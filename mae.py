@@ -47,7 +47,8 @@ from common.lib import (
     seed_everything,
     maybe_augment_noise,
     extract_beats_and_rr,
-    preprocess_beats_and_balance,
+    preprocess_beats,
+    balance_classes,
     ECGRRDataset,
     compute_metrics,
     percent_trained,
@@ -482,13 +483,7 @@ def main():
     seed_everything(SEED)
 
     X, RR, y = extract_beats_and_rr(args.folder, pre_process=None)
-    X, y = preprocess_beats_and_balance(
-        X,
-        y,
-        target_size=5000,
-        seed=SEED,
-        n_classes=5,
-    )
+    X = preprocess_beats(X)
 
     print(f"Loaded beats: {len(y)}")
     class_counts = {IDX2CLS[i]: int((y == i).sum()) for i in range(5)}
@@ -547,6 +542,15 @@ def main():
     print("\n=== Stage 2: classifier finetuning ===")
 
     X_train, y_train = percent_trained(X_train, y_train, args)
+
+    # Rebalance only the training set
+    X_train, y_train = balance_classes(
+        X_train,
+        y_train,
+        target_size=5000,
+        seed=SEED,
+        n_classes=5,
+    )
 
     class_counts = np.bincount(y_train, minlength=5).astype(np.float32)
     class_weights_np = class_counts.sum() / (len(class_counts) * class_counts + 1e-8)

@@ -32,7 +32,8 @@ from common.lib import (
     make_training_args,
     compute_metrics,
     percent_trained,
-    preprocess_beats_and_balance,
+    preprocess_beats,
+    balance_classes,
 )
 from novel.mae_lib import cls_collator, add_common_ecg_cli_args
 
@@ -311,13 +312,7 @@ def main():
     seed_everything(SEED)
 
     X, RR, y = extract_beats_and_rr(args.folder, pre_process=None)
-    X, y = preprocess_beats_and_balance(
-        X,
-        y,
-        target_size=5000,
-        seed=SEED,
-        n_classes=5,
-    )
+    X = preprocess_beats(X)
 
     print(f"Loaded beats: {len(y)}")
     class_counts = {IDX2CLS[i]: int((y == i).sum()) for i in range(5)}
@@ -380,6 +375,15 @@ def main():
 
     X_train_ft, y_train_ft = percent_trained(
         X_train, y_train, args
+    )
+
+    # Rebalance only the training set for finetuning
+    X_train_ft, y_train_ft = balance_classes(
+        X_train_ft,
+        y_train_ft,
+        target_size=5000,
+        seed=SEED,
+        n_classes=5,
     )
     class_counts_ft = np.bincount(y_train_ft, minlength=5).astype(np.float32)
     class_weights_ft_np = class_counts_ft.sum() / (

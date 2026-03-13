@@ -213,47 +213,42 @@ def extract_beats_and_rr(
     return X, RR, y
 
 
-def denoise(signal):
-
-    w = pywt.Wavelet('sym4')
+def denoise(signal: np.ndarray) -> np.ndarray:
+    w = pywt.Wavelet("sym4")
     maxlev = pywt.dwt_max_level(len(signal), w.dec_len)
 
     threshold = 0.04
 
-    coeffs = pywt.wavedec(signal, 'sym4', level=maxlev)
+    coeffs = pywt.wavedec(signal, "sym4", level=maxlev)
 
     for i in range(1, len(coeffs)):
         coeffs[i] = pywt.threshold(coeffs[i], threshold * max(coeffs[i]))
 
-    reconstructed = pywt.waverec(coeffs, 'sym4')
+    reconstructed = pywt.waverec(coeffs, "sym4")
 
-    return reconstructed[:len(signal)]
+    return reconstructed[: len(signal)]
 
 
-def preprocess_beats_and_balance(
+def preprocess_beats(X: np.ndarray) -> np.ndarray:
+    """
+    Normalize beats row-wise, apply wavelet denoising, then normalize again.
+    """
+    Xn = normalize_rows(X)
+    Xn = np.asarray([denoise(b) for b in Xn], dtype=np.float32)
+    Xn = normalize_rows(Xn)
+    return Xn.astype(np.float32)
+
+
+def balance_classes(
     X: np.ndarray,
     y: np.ndarray,
-    *,
-    target_size: int | None = 5000,
+    target_size: int,
     seed: int = SEED,
     n_classes: int = 5,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Common preprocessing used in experiments:
-    - normalize each beat (row-wise)
-    - wavelet denoise each beat
-    - normalize again
-    - optional class rebalancing by resampling to `target_size` per class
+    Rebalance dataset by resampling each class to `target_size`.
     """
-    Xn = normalize_rows(X)
-
-    Xn = np.asarray([denoise(b) for b in Xn], dtype=np.float32)
-
-    Xn = normalize_rows(Xn)
-
-    if target_size is None:
-        return Xn.astype(np.float32), y.astype(np.int64)
-
     rng = np.random.default_rng(seed)
     idxs = []
     for c in range(n_classes):
@@ -263,11 +258,11 @@ def preprocess_beats_and_balance(
         pick = rng.choice(cls_idx, size=target_size, replace=True)
         idxs.append(pick)
     if not idxs:
-        return Xn.astype(np.float32), y.astype(np.int64)
+        return X.astype(np.float32), y.astype(np.int64)
 
     idxs = np.concatenate(idxs)
     rng.shuffle(idxs)
-    return Xn[idxs].astype(np.float32), y[idxs].astype(np.int64)
+    return X[idxs].astype(np.float32), y[idxs].astype(np.int64)
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +360,9 @@ __all__ = [
     "add_em_noise",
     "maybe_augment_noise",
     "extract_beats_and_rr",
-    "preprocess_beats_and_balance",
+    "denoise",
+    "preprocess_beats",
+    "balance_classes",
     "ECGRRDataset",
     "compute_metrics",
     "percent_trained",
