@@ -46,12 +46,12 @@ from common.lib import (
     seed_everything,
     extract_beats_and_rr,
     low_pass_filter,
-    normalize_rows,
     maybe_augment_noise,
     ECGRRDataset,
     make_training_args,
     compute_metrics,
     percent_trained,
+    preprocess_beats_and_balance,
 )
 from novel.mae_lib import (
     ECGMAEDataset,
@@ -549,7 +549,14 @@ def main():
     seed_everything(SEED)
 
     X, RR, y = extract_beats_and_rr(args.folder, pre_process=low_pass_filter)
-    X = normalize_rows(X)
+    X, y = preprocess_beats_and_balance(
+        X,
+        y,
+        per_beat_fn=None,
+        target_size=None,
+        seed=SEED,
+        n_classes=5,
+    )
 
     print(f"Loaded beats: {len(y)}")
     class_counts = {IDX2CLS[i]: int((y == i).sum()) for i in range(5)}
