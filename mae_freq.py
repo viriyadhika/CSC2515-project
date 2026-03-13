@@ -551,7 +551,7 @@ def main():
     X, y = preprocess_beats_and_balance(
         X,
         y,
-        target_size=None,
+        target_size=5000,
         seed=SEED,
         n_classes=5,
     )
@@ -561,11 +561,11 @@ def main():
     print("Class counts:", class_counts)
 
     # Same 7:1:2 split as TinyTransformer / original MAE script
-    X_train, X_tmp, RR_train, RR_tmp, y_train, y_tmp = train_test_split(
-        X, RR, y, test_size=0.30, stratify=y, random_state=SEED
+    X_train, X_tmp, y_train, y_tmp = train_test_split(
+        X, y, test_size=0.30, stratify=y, random_state=SEED
     )
-    X_valid, X_test, RR_valid, RR_test, y_valid, y_test = train_test_split(
-        X_tmp, RR_tmp, y_tmp, test_size=2 / 3, stratify=y_tmp, random_state=SEED
+    X_valid, X_test, y_valid, y_test = train_test_split(
+        X_tmp, y_tmp, test_size=2 / 3, stratify=y_tmp, random_state=SEED
     )
 
     if args.use_noise_aug:
