@@ -50,7 +50,7 @@ def add_common_ecg_cli_args(
     and output/checkpoint options. Model-specific args should remain in each script.
     """
     parser.add_argument(
-        "--folder", type=str, default="mit-bih-arrhythmia-database-1.0.0"
+        "--folder", type=str, default="data/mit-bih-arrhythmia-database-1.0.0"
     )
     parser.add_argument("--nstdb_folder", type=str, default=None)
 
