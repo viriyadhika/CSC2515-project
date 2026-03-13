@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix
-from transformers import AutoFeatureExtractor, AutoModelForAudioClassification, Trainer
+from transformers import AutoFeatureExtractor, AutoModelForAudioClassification, Trainer, AutoConfig
 
 from common.dataloader import AudioLoader
 from common.lib import (
@@ -130,6 +130,7 @@ def main():
     )
     parser.add_argument("--balance_target_size", type=int, default=None)
     parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--finetune", action="store_true")
     args = parser.parse_args()
 
     seed_everything(SEED)
@@ -173,13 +174,26 @@ def main():
     label2id = {label_names[i]: i for i in range(n_classes)}
 
     model_name = args.checkpoint or args.model_name
-    model = AutoModelForAudioClassification.from_pretrained(
-        model_name,
-        num_labels=n_classes,
-        label2id=label2id,
-        id2label=id2label,
-        ignore_mismatched_sizes=True,
-    )
+
+    if args.finetune:
+        print("Loading pretrained model")
+        model = AutoModelForAudioClassification.from_pretrained(
+            model_name,
+            num_labels=n_classes,
+            label2id=label2id,
+            id2label=id2label,
+            ignore_mismatched_sizes=True,
+        )
+    else:
+        print("Loading raw model")
+        config = AutoConfig.from_pretrained(
+            model_name,
+            num_labels=n_classes,
+            label2id=label2id,
+            id2label=id2label,
+        )
+
+        model = AutoModelForAudioClassification.from_config(config)
 
     training_args = make_training_args(
         output_dir=str(Path(args.output_dir) / "finetune"),
