@@ -27,7 +27,6 @@ from common.lib import (
     IDX2CLS,
     seed_everything,
     extract_beats_and_rr,
-    low_pass_filter,
     maybe_augment_noise,
     ECGRRDataset,
     make_training_args,
@@ -311,11 +310,10 @@ def main():
 
     seed_everything(SEED)
 
-    X, RR, y = extract_beats_and_rr(args.folder, pre_process=low_pass_filter)
+    X, RR, y = extract_beats_and_rr(args.folder, pre_process=None)
     X, y = preprocess_beats_and_balance(
         X,
         y,
-        per_beat_fn=None,
         target_size=None,
         seed=SEED,
         n_classes=5,

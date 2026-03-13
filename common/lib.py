@@ -212,11 +212,27 @@ def extract_beats_and_rr(
     return X, RR, y
 
 
+def denoise(signal):
+
+    w = pywt.Wavelet('sym4')
+    maxlev = pywt.dwt_max_level(len(signal), w.dec_len)
+
+    threshold = 0.04
+
+    coeffs = pywt.wavedec(signal, 'sym4', level=maxlev)
+
+    for i in range(1, len(coeffs)):
+        coeffs[i] = pywt.threshold(coeffs[i], threshold * max(coeffs[i]))
+
+    reconstructed = pywt.waverec(coeffs, 'sym4')
+
+    return reconstructed[:len(signal)]
+
+
 def preprocess_beats_and_balance(
     X: np.ndarray,
     y: np.ndarray,
     *,
-    per_beat_fn: Callable[[np.ndarray], np.ndarray] | None = None,
     target_size: int | None = None,
     seed: int = SEED,
     n_classes: int = 5,
@@ -230,8 +246,7 @@ def preprocess_beats_and_balance(
     """
     Xn = normalize_rows(X)
 
-    if per_beat_fn is not None:
-        Xn = np.asarray([per_beat_fn(b) for b in Xn], dtype=np.float32)
+    Xn = np.asarray([denoise(b) for b in Xn], dtype=np.float32)
 
     Xn = normalize_rows(Xn)
 

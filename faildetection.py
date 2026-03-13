@@ -26,21 +26,6 @@ from common.lib import (
 )
 
 # %%
-def denoise(signal):
-
-    w = pywt.Wavelet('sym4')
-    maxlev = pywt.dwt_max_level(len(signal), w.dec_len)
-
-    threshold = 0.04
-
-    coeffs = pywt.wavedec(signal, 'sym4', level=maxlev)
-
-    for i in range(1, len(coeffs)):
-        coeffs[i] = pywt.threshold(coeffs[i], threshold * max(coeffs[i]))
-
-    reconstructed = pywt.waverec(coeffs, 'sym4')
-
-    return reconstructed[:len(signal)]
 
 # %%
 import numpy as np
@@ -63,7 +48,6 @@ print(X.shape, y.shape)
 X, y = preprocess_beats_and_balance(
     X,
     y,
-    per_beat_fn=denoise,
     target_size=5000,
     seed=SEED,
     n_classes=5,

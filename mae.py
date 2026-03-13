@@ -47,7 +47,6 @@ from common.lib import (
     seed_everything,
     maybe_augment_noise,
     extract_beats_and_rr,
-    low_pass_filter,
     preprocess_beats_and_balance,
     ECGRRDataset,
     compute_metrics,
@@ -482,11 +481,10 @@ def main():
 
     seed_everything(SEED)
 
-    X, RR, y = extract_beats_and_rr(args.folder, pre_process=low_pass_filter)
+    X, RR, y = extract_beats_and_rr(args.folder, pre_process=None)
     X, y = preprocess_beats_and_balance(
         X,
         y,
-        per_beat_fn=None,
         target_size=None,
         seed=SEED,
         n_classes=5,
