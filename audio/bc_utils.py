@@ -30,11 +30,27 @@ def change_audio_rate(audio_fname, src_dir, new_audio_rate, dest_dir=None):
     if not os.path.isfile(wav_path_dest):
         if not os.path.isdir(dest_dir):
             os.mkdir(dest_dir)
-        cmd = 'ffmpeg -i {} -ar {} -b:a 16k -ac 1 {}'.format(
+        cmd = [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-nostats",
+            "-i",
             wav_path_orig,
-            new_audio_rate,
-            wav_path_dest)
-        subprocess.call(cmd, shell=True)
+            "-ar",
+            str(new_audio_rate),
+            "-b:a",
+            "16k",
+            "-ac",
+            "1",
+            wav_path_dest,
+        ]
+        subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
 
 
 # Default data augmentation
@@ -188,6 +204,5 @@ def to_hms(time):
         line = '{}m{:02d}s'.format(m, s)
 
     return line
-
 
 
