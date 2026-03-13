@@ -331,7 +331,7 @@ def run_kfold(X: np.ndarray, RR: np.ndarray, y: np.ndarray, args) -> None:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--folder", type=str, default="mit-bih-arrhythmia-database-1.0.0")
+    parser.add_argument("--folder", type=str, default="data/mit-bih-arrhythmia-database-1.0.0")
     parser.add_argument("--nstdb_folder", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=128)
