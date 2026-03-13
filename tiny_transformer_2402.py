@@ -52,6 +52,7 @@ from common.lib import (
     seed_everything,
     normalize_rows,
     baseline_remove_and_lowpass,
+    low_pass_filter,
     load_electrode_motion_noise,
     add_em_noise,
     maybe_augment_noise,
@@ -329,7 +330,7 @@ def main():
 
     seed_everything(SEED)
 
-    X, RR, y = extract_beats_and_rr(args.folder, denoise=True)
+    X, RR, y = extract_beats_and_rr(args.folder, pre_process=low_pass_filter)
     X = normalize_rows(X)
 
     print(f"Loaded beats: {len(y)}")

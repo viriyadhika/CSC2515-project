@@ -12,7 +12,7 @@ This module holds everything that is shared between:
 import os
 import random
 from pathlib import Path
-from typing import Tuple
+from typing import Callable, Tuple
 
 import numpy as np
 import torch
@@ -91,6 +91,10 @@ def baseline_remove_and_lowpass(sig: np.ndarray, fs: int = FS) -> np.ndarray:
     return filtfilt(b, a, sig)
 
 
+def low_pass_filter(sig: np.ndarray, fs: int = FS) -> np.ndarray:
+    return baseline_remove_and_lowpass(sig, fs=fs)
+
+
 def load_electrode_motion_noise(nstdb_folder: str) -> np.ndarray:
     records = sorted(f[:-4] for f in os.listdir(nstdb_folder) if f.endswith(".hea"))
     if not records:
@@ -141,7 +145,7 @@ def maybe_augment_noise(
 
 def extract_beats_and_rr(
     folder: str,
-    denoise: bool = True,
+    pre_process: Callable[[np.ndarray], np.ndarray] | None = None,
     *,
     window: int = WINDOW,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -152,13 +156,11 @@ def extract_beats_and_rr(
     ----------
     folder : str
         Folder containing WFDB records.
-    denoise : bool, default True
-        If True, apply baseline removal and low-pass filtering.
+    pre_process : Callable[[np.ndarray], np.ndarray] | None, default None
+        Optional function applied to the raw signal array for each record
+        before beat extraction (e.g., `low_pass_filter`).
     window : int, default WINDOW
         Half-window size in samples. Each beat has length 2 * window.
-    record_list : list[str] | None, default None
-        Optional explicit list of record IDs to use. If None, all .hea
-        records in the folder are used (excluding EXCLUDED_RECORDS).
     """
     X, RR, y = [], [], []
     records = sorted(f[:-4] for f in os.listdir(folder) if f.endswith(".hea"))
@@ -172,8 +174,8 @@ def extract_beats_and_rr(
         ann = wfdb.rdann(path, "atr")
 
         sig = record.p_signal[:, 0]
-        if denoise:
-            sig = baseline_remove_and_lowpass(sig)
+        if pre_process is not None:
+            sig = pre_process(sig)
 
         peaks = ann.sample
         syms = ann.symbol
@@ -208,6 +210,48 @@ def extract_beats_and_rr(
 
     RR = np.clip((RR / FS - 1.0), -2.0, 2.0)
     return X, RR, y
+
+
+def preprocess_beats_and_balance(
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    per_beat_fn: Callable[[np.ndarray], np.ndarray] | None = None,
+    target_size: int | None = None,
+    seed: int = SEED,
+    n_classes: int = 5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Common preprocessing used in experiments:
+    - normalize each beat (row-wise)
+    - optional per-beat transform (e.g. wavelet denoise)
+    - normalize again
+    - optional class rebalancing by resampling to `target_size` per class
+    """
+    Xn = normalize_rows(X)
+
+    if per_beat_fn is not None:
+        Xn = np.asarray([per_beat_fn(b) for b in Xn], dtype=np.float32)
+
+    Xn = normalize_rows(Xn)
+
+    if target_size is None:
+        return Xn.astype(np.float32), y.astype(np.int64)
+
+    rng = np.random.default_rng(seed)
+    idxs = []
+    for c in range(n_classes):
+        cls_idx = np.where(y == c)[0]
+        if len(cls_idx) == 0:
+            continue
+        pick = rng.choice(cls_idx, size=target_size, replace=True)
+        idxs.append(pick)
+    if not idxs:
+        return Xn.astype(np.float32), y.astype(np.int64)
+
+    idxs = np.concatenate(idxs)
+    rng.shuffle(idxs)
+    return Xn[idxs].astype(np.float32), y[idxs].astype(np.int64)
 
 
 # ---------------------------------------------------------------------------
@@ -303,10 +347,12 @@ __all__ = [
     "seed_everything",
     "normalize_rows",
     "baseline_remove_and_lowpass",
+    "low_pass_filter",
     "load_electrode_motion_noise",
     "add_em_noise",
     "maybe_augment_noise",
     "extract_beats_and_rr",
+    "preprocess_beats_and_balance",
     "ECGRRDataset",
     "compute_metrics",
     "percent_trained",

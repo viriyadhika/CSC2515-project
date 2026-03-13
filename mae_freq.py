@@ -45,6 +45,7 @@ from common.lib import (
     IDX2CLS,
     seed_everything,
     extract_beats_and_rr,
+    low_pass_filter,
     normalize_rows,
     maybe_augment_noise,
     ECGRRDataset,
@@ -547,7 +548,7 @@ def main():
 
     seed_everything(SEED)
 
-    X, RR, y = extract_beats_and_rr(args.folder, denoise=True)
+    X, RR, y = extract_beats_and_rr(args.folder, pre_process=low_pass_filter)
     X = normalize_rows(X)
 
     print(f"Loaded beats: {len(y)}")

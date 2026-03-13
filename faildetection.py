@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 import pywt
 from scipy import stats
 
-from sklearn.utils import resample
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
 
@@ -18,14 +17,12 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
 from common.lib import (
-    EXCLUDED_RECORDS,
-    encode_label,
-    normalize_rows,
     compute_metrics,
     seed_everything,
     SEED,
     make_training_args,
     extract_beats_and_rr,
+    preprocess_beats_and_balance,
 )
 
 # %%
@@ -46,7 +43,6 @@ def denoise(signal):
     return reconstructed[:len(signal)]
 
 # %%
-import wfdb
 import numpy as np
 from sklearn.model_selection import train_test_split
 
@@ -58,63 +54,20 @@ folder = "data/mit-bih-arrhythmia-database-1.0.0"
 
 X, RR, y = extract_beats_and_rr(
     folder,
-    denoise=False,
+    pre_process=None,
     window=window,
-    record_list=records,
 )
-
-X = normalize_rows(X)
 
 print(X.shape, y.shape)
 
-X_denoised = []
-
-for beat in tqdm(X):
-    clean = denoise(beat)
-    X_denoised.append(clean)
-
-X_denoised = np.array(X_denoised)
-
-print("After denoising:", X_denoised.shape)
-
-X_normalized = normalize_rows(X_denoised)
-
-print("After normalization:", X_normalized.shape)
-
-# %%
-import pandas as pd
-from sklearn.utils import resample
-
-# Combine X and y
-data = np.hstack((X_normalized, y.reshape(-1,1)))
-
-df = pd.DataFrame(data)
-
-label_col = df.shape[1] - 1
-
-# Split classes
-df_0 = df[df[label_col] == 0]
-df_1 = df[df[label_col] == 1]
-df_2 = df[df[label_col] == 2]
-df_3 = df[df[label_col] == 3]
-df_4 = df[df[label_col] == 4]
-
-target_size = 5000
-
-df_0 = resample(df_0, replace=True, n_samples=target_size, random_state=42)
-df_1 = resample(df_1, replace=True, n_samples=target_size, random_state=42)
-df_2 = resample(df_2, replace=True, n_samples=target_size, random_state=42)
-df_3 = resample(df_3, replace=True, n_samples=target_size, random_state=42)
-df_4 = resample(df_4, replace=True, n_samples=target_size, random_state=42)
-
-df_balanced = pd.concat([df_0, df_1, df_2, df_3, df_4])
-
-# # Shuffle
-df_balanced = df_balanced.sample(frac=1).reset_index(drop=True)
-
-# # Split back
-X = df_balanced.iloc[:,:-1].values
-y = df_balanced.iloc[:,-1].values
+X, y = preprocess_beats_and_balance(
+    X,
+    y,
+    per_beat_fn=denoise,
+    target_size=5000,
+    seed=SEED,
+    n_classes=5,
+)
 
 print("Balanced dataset:", X.shape)
 
