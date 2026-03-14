@@ -97,7 +97,7 @@ class LogMelPadCrop:
         self,
         sample_rate: int = 16000,
         n_mels: int = 128,
-        n_fft: int = 400,
+        n_fft: int = 1024,
         win_length: int = 400,
         hop_length: int = 160,
         target_length: int = 1024,
@@ -261,6 +261,10 @@ class AudioASTMAE(nn.Module):
         self.decoder_embed = nn.Linear(self.hidden_size, decoder_dim)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_dim))
         self.decoder_pos = nn.Parameter(torch.zeros(1, self.num_patches, decoder_dim))
+        decoder_heads = compatible_num_heads(
+            decoder_dim,
+            max(1, int(getattr(config, "num_attention_heads", 8)) // 2),
+        )
 
         decoder_layer = nn.TransformerEncoderLayer(
             d_model=decoder_dim,
