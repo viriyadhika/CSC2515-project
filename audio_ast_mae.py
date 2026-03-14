@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torchaudio
 from torch.utils.data import ConcatDataset
-from transformers import AutoConfig, AutoModel, AutoModelForAudioClassification, Trainer
+from transformers import AutoConfig, AutoModel, Trainer
 
 from common.dataloader import AudioLoader, ESC50_AUDIO_RATE
 from common.lib import (
@@ -80,16 +80,6 @@ def _extract_last_hidden_state(outputs):
     if isinstance(outputs, (tuple, list)):
         return outputs[0]
     return outputs
-
-
-def _get_classifier_backbone(model: nn.Module) -> nn.Module:
-    if hasattr(model, "audio_spectrogram_transformer"):
-        return model.audio_spectrogram_transformer
-    if hasattr(model, "ast"):
-        return model.ast
-    if hasattr(model, "backbone"):
-        return model.backbone
-    raise AttributeError("Could not find AST backbone module on classifier model")
 
 
 class LogMelPadCrop:
@@ -337,14 +327,13 @@ class AudioASTMAE(nn.Module):
         n_classes: int,
         class_weights: torch.Tensor | None = None,
     ):
-        clf_config = self.base_config.to_dict()
-        clf_config["num_labels"] = n_classes
-        clf_config = self.base_config.__class__.from_dict(clf_config)
-        hf_model = AutoModelForAudioClassification.from_config(clf_config)
-        backbone = _get_classifier_backbone(hf_model)
+        backbone_config = self.base_config.__class__.from_dict(self.base_config.to_dict())
+        backbone = AutoModel.from_config(backbone_config)
         backbone.load_state_dict(self.backbone.state_dict(), strict=False)
         model = AudioASTClassifier(
-            hf_model=hf_model,
+            backbone=backbone,
+            hidden_size=self.hidden_size,
+            n_classes=n_classes,
             class_weights=class_weights,
         )
         return model
@@ -353,16 +342,23 @@ class AudioASTMAE(nn.Module):
 class AudioASTClassifier(nn.Module):
     def __init__(
         self,
-        hf_model: nn.Module,
+        backbone: nn.Module,
+        hidden_size: int,
+        n_classes: int,
         class_weights: torch.Tensor | None = None,
     ):
         super().__init__()
-        self.hf_model = hf_model
+        self.backbone = backbone
+        self.head = nn.Linear(hidden_size, n_classes)
         self.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
     def forward(self, x=None, labels=None):
-        outputs = self.hf_model(input_values=x)
-        logits = outputs.logits
+        outputs = self.backbone(x)
+        hidden = _extract_last_hidden_state(outputs)
+        if hidden.dim() != 3:
+            raise ValueError(f"Expected hidden states with shape [B, N, D], got {hidden.shape}")
+        pooled = hidden.mean(dim=1)
+        logits = self.head(pooled)
         loss = None
         if labels is not None:
             loss = self.loss_fn(logits, labels)
