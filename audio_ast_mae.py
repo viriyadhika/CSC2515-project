@@ -136,8 +136,10 @@ class LogMelPadCrop:
 
 class FolderAudioPretrainDataset(torch.utils.data.Dataset):
     def __init__(self, files: list[str], transform: LogMelPadCrop):
-        self.files = files
+        self.files = self._filter_decodable_files(files)
         self.transform = transform
+        if not self.files:
+            raise RuntimeError("No decodable audio files found for pretraining.")
 
     def __len__(self) -> int:
         return len(self.files)
@@ -146,6 +148,23 @@ class FolderAudioPretrainDataset(torch.utils.data.Dataset):
         waveform, sr = torchaudio.load(self.files[idx])
         spec = self.transform(waveform, sr)
         return {"x": spec}
+
+    @staticmethod
+    def _filter_decodable_files(files: list[str]) -> list[str]:
+        valid_files = []
+        skipped = 0
+        for path in files:
+            try:
+                waveform, _ = torchaudio.load(path)
+                if waveform.numel() == 0:
+                    skipped += 1
+                    continue
+                valid_files.append(path)
+            except Exception:
+                skipped += 1
+        if skipped:
+            print(f"Skipped {skipped} unreadable audio files during dataset scan.")
+        return valid_files
 
 
 class WaveformArrayPretrainDataset(torch.utils.data.Dataset):
