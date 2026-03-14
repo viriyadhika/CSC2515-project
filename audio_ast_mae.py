@@ -339,7 +339,7 @@ class AudioASTMAE(nn.Module):
     ):
         clf_config = self.base_config.to_dict()
         clf_config["num_labels"] = n_classes
-        clf_config = AutoConfig.for_model(self.base_config.model_type, **clf_config)
+        clf_config = self.base_config.__class__.from_dict(clf_config)
         hf_model = AutoModelForAudioClassification.from_config(clf_config)
         backbone = _get_classifier_backbone(hf_model)
         backbone.load_state_dict(self.backbone.state_dict(), strict=False)
