@@ -303,7 +303,7 @@ class AudioASTMAE(nn.Module):
         target = self.patchify(x).detach()
         tokens = self.tokenize(x)
         x_masked, mask, ids_restore = random_mask_by_count(tokens, self.mask_patch)
-        encoder_outputs = self.backbone.encoder(x_masked, return_dict=True)
+        encoder_outputs = self.backbone.encoder(x_masked)
         latent = _extract_last_hidden_state(encoder_outputs)
         if hasattr(self.backbone, "layernorm"):
             latent = self.backbone.layernorm(latent)
