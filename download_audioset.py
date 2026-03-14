@@ -4,10 +4,12 @@ import pandas as pd
 from tqdm import tqdm
 import sys
 import glob
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 CSV_FILE = "data/balanced_train_segments.csv"
 OUTPUT_DIR = "data/audioset_5000"
 TARGET_CLIPS = 5000
+MAX_WORKERS = 8
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -33,8 +35,9 @@ print("Selected subset:", len(subset))
 def download_clip(ytid, start, end, output_path):
 
     url = f"https://www.youtube.com/watch?v={ytid}"
-    template = f"{ytid}.%(ext)s"
+    template = f"{ytid}_{int(start)}.%(ext)s"
 
+    # download audio using yt_dlp
     subprocess.run(
         [
             sys.executable,
@@ -42,6 +45,8 @@ def download_clip(ytid, start, end, output_path):
             "yt_dlp",
             "-f",
             "bestaudio",
+            "--quiet",
+            "--no-warnings",
             "-o",
             template,
             url
@@ -50,14 +55,14 @@ def download_clip(ytid, start, end, output_path):
         stderr=subprocess.DEVNULL
     )
 
-    files = glob.glob(f"{ytid}.*")
+    files = glob.glob(f"{ytid}_{int(start)}.*")
 
     if not files:
-        print("Failed to see file")
-        return
+        return False
 
     temp_file = files[0]
 
+    # trim and convert audio
     subprocess.run(
         [
             "ffmpeg",
@@ -78,30 +83,47 @@ def download_clip(ytid, start, end, output_path):
         stderr=subprocess.DEVNULL
     )
 
-    os.remove(temp_file)
+    try:
+        os.remove(temp_file)
+    except:
+        pass
+
+    return os.path.exists(output_path)
 
 
-success = 0
-
-for _, row in tqdm(subset.iterrows(), total=len(subset)):
+def process_row(row):
 
     ytid = row["YTID"]
     start = row["start"]
     end = row["end"]
 
-    out_file = os.path.join(OUTPUT_DIR, f"{ytid}.wav")
+    out_file = os.path.join(OUTPUT_DIR, f"{ytid}_{int(start)}.wav")
 
     if os.path.exists(out_file):
-        success += 1
-        continue
+        return True
 
-    download_clip(ytid, start, end, out_file)
+    return download_clip(ytid, start, end, out_file)
 
-    if os.path.exists(out_file):
-        success += 1
 
-    if success >= TARGET_CLIPS:
-        break
+success = 0
+
+print(f"Starting downloads with {MAX_WORKERS} workers...")
+
+with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+
+    futures = [
+        executor.submit(process_row, row)
+        for _, row in subset.iterrows()
+    ]
+
+    for future in tqdm(as_completed(futures), total=len(futures)):
+
+        if future.result():
+            success += 1
+
+        if success >= TARGET_CLIPS:
+            break
 
 print("Downloaded clips:", success)
 print("Saved to:", OUTPUT_DIR)
+
