@@ -14,6 +14,7 @@ then trained with a masked patch reconstruction objective in the same spirit as
 from __future__ import annotations
 
 import argparse
+import math
 import random
 from pathlib import Path
 
@@ -22,7 +23,7 @@ import torch
 import torch.nn as nn
 import torchaudio
 from torch.utils.data import ConcatDataset
-from transformers import AutoConfig, Trainer
+from transformers import AutoConfig, AutoModel, AutoModelForAudioClassification, Trainer
 
 from common.dataloader import AudioLoader, ESC50_AUDIO_RATE
 from common.lib import (
@@ -56,6 +57,39 @@ def find_audio_files(root: str | None) -> list[str]:
         if path.is_file() and path.suffix.lower() in AUDIO_EXTS
     ]
     return sorted(set(files))
+
+
+def compatible_num_heads(embed_dim: int, preferred_heads: int) -> int:
+    preferred_heads = max(1, int(preferred_heads))
+    if embed_dim % preferred_heads == 0:
+        return preferred_heads
+
+    gcd_heads = math.gcd(embed_dim, preferred_heads)
+    if gcd_heads > 0:
+        return gcd_heads
+
+    for heads in range(min(embed_dim, preferred_heads), 0, -1):
+        if embed_dim % heads == 0:
+            return heads
+    return 1
+
+
+def _extract_last_hidden_state(outputs):
+    if hasattr(outputs, "last_hidden_state"):
+        return outputs.last_hidden_state
+    if isinstance(outputs, (tuple, list)):
+        return outputs[0]
+    return outputs
+
+
+def _get_classifier_backbone(model: nn.Module) -> nn.Module:
+    if hasattr(model, "audio_spectrogram_transformer"):
+        return model.audio_spectrogram_transformer
+    if hasattr(model, "ast"):
+        return model.ast
+    if hasattr(model, "backbone"):
+        return model.backbone
+    raise AttributeError("Could not find AST backbone module on classifier model")
 
 
 class LogMelPadCrop:
@@ -209,6 +243,7 @@ class AudioASTMAE(nn.Module):
         self.num_mel_bins = num_mel_bins
         self.target_length = target_length
         self.mask_patch = mask_patch
+        self.base_config = config
         self.hidden_size = int(config.hidden_size)
         self.decoder_dim = decoder_dim
 
@@ -221,28 +256,7 @@ class AudioASTMAE(nn.Module):
         self.num_patches = self.layout.num_patches
         self.patch_size = self.layout.patch_area
 
-        self.patch_embed = nn.Conv2d(
-            in_channels=1,
-            out_channels=self.hidden_size,
-            kernel_size=(fshape, tshape),
-            stride=(fshape, tshape),
-        )
-        self.pos = nn.Parameter(torch.zeros(1, self.num_patches, self.hidden_size))
-
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.hidden_size,
-            nhead=int(config.num_attention_heads),
-            dim_feedforward=int(config.intermediate_size),
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-            dropout=float(getattr(config, "hidden_dropout_prob", 0.0)),
-        )
-        self.encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=int(config.num_hidden_layers),
-        )
-        self.encoder_norm = nn.LayerNorm(self.hidden_size)
+        self.backbone = AutoModel.from_config(config)
 
         self.decoder_embed = nn.Linear(self.hidden_size, decoder_dim)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_dim))
@@ -250,7 +264,7 @@ class AudioASTMAE(nn.Module):
 
         decoder_layer = nn.TransformerEncoderLayer(
             d_model=decoder_dim,
-            nhead=max(1, int(config.num_attention_heads) // 2),
+            nhead=decoder_heads,
             dim_feedforward=decoder_dim * 4,
             activation="gelu",
             batch_first=True,
@@ -273,16 +287,22 @@ class AudioASTMAE(nn.Module):
 
     def tokenize(self, x: torch.Tensor) -> torch.Tensor:
         x = x[:, : self.layout.time_frames, : self.layout.freq_bins]
-        x = x.transpose(1, 2).unsqueeze(1)
-        tokens_2d = self.patch_embed(x)
-        return tokens_2d.flatten(2).transpose(1, 2)
+        embeddings = self.backbone.embeddings(x)
+        special_tokens = embeddings.shape[1] - self.num_patches
+        if special_tokens < 0:
+            raise ValueError(
+                f"Backbone returned too few tokens: got {embeddings.shape[1]}, expected at least {self.num_patches}"
+            )
+        return embeddings[:, special_tokens:, :]
 
     def forward_encoder(self, x: torch.Tensor):
         target = self.patchify(x).detach()
-        tokens = self.tokenize(x) + self.pos
+        tokens = self.tokenize(x)
         x_masked, mask, ids_restore = random_mask_by_count(tokens, self.mask_patch)
-        latent = self.encoder(x_masked)
-        latent = self.encoder_norm(latent)
+        encoder_outputs = self.backbone.encoder(x_masked, return_dict=True)
+        latent = _extract_last_hidden_state(encoder_outputs)
+        if hasattr(self.backbone, "layernorm"):
+            latent = self.backbone.layernorm(latent)
         return latent, target, mask, ids_restore
 
     def forward_decoder(self, latent: torch.Tensor, ids_restore: torch.Tensor) -> torch.Tensor:
@@ -313,71 +333,32 @@ class AudioASTMAE(nn.Module):
         n_classes: int,
         class_weights: torch.Tensor | None = None,
     ):
+        clf_config = self.base_config.to_dict()
+        clf_config["num_labels"] = n_classes
+        clf_config = AutoConfig.for_model(self.base_config.model_type, **clf_config)
+        hf_model = AutoModelForAudioClassification.from_config(clf_config)
+        backbone = _get_classifier_backbone(hf_model)
+        backbone.load_state_dict(self.backbone.state_dict(), strict=False)
         model = AudioASTClassifier(
-            layout=self.layout,
-            hidden_size=self.hidden_size,
-            num_hidden_layers=len(self.encoder.layers),
-            num_attention_heads=self.encoder.layers[0].self_attn.num_heads,
-            intermediate_size=self.encoder.layers[0].linear1.out_features,
+            hf_model=hf_model,
             class_weights=class_weights,
-            n_classes=n_classes,
         )
-        model.patch_embed.load_state_dict(self.patch_embed.state_dict())
-        model.pos.data.copy_(self.pos.data)
-        model.encoder.load_state_dict(self.encoder.state_dict())
-        model.encoder_norm.load_state_dict(self.encoder_norm.state_dict())
         return model
 
 
 class AudioASTClassifier(nn.Module):
     def __init__(
         self,
-        layout: SpectrogramLayout,
-        hidden_size: int,
-        num_hidden_layers: int,
-        num_attention_heads: int,
-        intermediate_size: int,
-        n_classes: int,
+        hf_model: nn.Module,
         class_weights: torch.Tensor | None = None,
     ):
         super().__init__()
-        self.layout = layout
-        self.patch_embed = nn.Conv2d(
-            in_channels=1,
-            out_channels=hidden_size,
-            kernel_size=(layout.freq_patch, layout.time_patch),
-            stride=(layout.freq_patch, layout.time_patch),
-        )
-        self.pos = nn.Parameter(torch.zeros(1, layout.num_patches, hidden_size))
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_size,
-            nhead=num_attention_heads,
-            dim_feedforward=intermediate_size,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-            dropout=0.1,
-        )
-        self.encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=num_hidden_layers,
-        )
-        self.encoder_norm = nn.LayerNorm(hidden_size)
-        self.head = nn.Linear(hidden_size, n_classes)
+        self.hf_model = hf_model
         self.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 
-    def tokenize(self, x: torch.Tensor) -> torch.Tensor:
-        x = x[:, : self.layout.time_frames, : self.layout.freq_bins]
-        x = x.transpose(1, 2).unsqueeze(1)
-        tokens_2d = self.patch_embed(x)
-        return tokens_2d.flatten(2).transpose(1, 2)
-
     def forward(self, x=None, labels=None):
-        tokens = self.tokenize(x) + self.pos
-        latent = self.encoder(tokens)
-        latent = self.encoder_norm(latent)
-        pooled = latent.mean(dim=1)
-        logits = self.head(pooled)
+        outputs = self.hf_model(input_values=x)
+        logits = outputs.logits
         loss = None
         if labels is not None:
             loss = self.loss_fn(logits, labels)
