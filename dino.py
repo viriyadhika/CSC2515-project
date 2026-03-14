@@ -19,7 +19,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix
-from transformers import Trainer, TrainerCallback, TrainingArguments
 
 from common.dataloader import ECGLoader
 from common.lib import (
@@ -32,7 +31,13 @@ from common.lib import (
     percent_trained,
     balance_classes,
 )
-from novel.mae_lib import cls_collator, add_common_ecg_cli_args, evaluate_knn_and_tsne_on_test
+from novel.dino_utils import (
+    DINOHead,
+    compute_feature_std,
+    dino_pretrain_from_datasets,
+    dino_finetune_from_datasets,
+)
+from novel.mae_lib import ECGMAEDataset, add_common_ecg_cli_args, evaluate_knn_and_tsne_on_test
 
 
 class ECGEncoder(nn.Module):
@@ -73,32 +78,6 @@ class ECGEncoder(nn.Module):
         x = self.encoder(x)
         x = self.norm(x)
         x = x.mean(dim=1)  # global embedding [B, D]
-        return x
-
-
-class DINOHead(nn.Module):
-    def __init__(
-        self,
-        in_dim: int,
-        out_dim: int = 256,
-        hidden_dim: int = 512,
-        bottleneck_dim: int = 128,
-    ):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, bottleneck_dim),
-        )
-        self.last_layer = nn.utils.weight_norm(
-            nn.Linear(bottleneck_dim, out_dim, bias=False)
-        )
-        self.last_layer.weight_g.data.fill_(1.0)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.mlp(x)
-        x = F.normalize(x, dim=-1)
-        x = self.last_layer(x)
         return x
 
 
@@ -225,49 +204,6 @@ class ECGDINODataset(torch.utils.data.Dataset):
         return {"x1": x1, "x2": x2}
 
 
-def dino_collator(batch):
-    x1 = torch.stack([b["x1"] for b in batch])
-    x2 = torch.stack([b["x2"] for b in batch])
-    return {"x1": x1, "x2": x2}
-
-
-class DINOTeacherUpdateCallback(TrainerCallback):
-    def __init__(self, momentum: float = 0.996):
-        self.momentum = momentum
-
-    def on_step_end(self, args, state, control, model=None, **kwargs):
-        if model is not None:
-            model.update_teacher(momentum=self.momentum)
-
-
-class DINOFeatureStdCallback(TrainerCallback):
-    """Every `interval` epochs, compute mean feature std over first n_samples train embeddings."""
-
-    def __init__(self, X_train: np.ndarray, n_samples: int = 2000, interval: int = 10):
-        self.X_train = X_train
-        self.n_samples = min(n_samples, len(X_train))
-        self.interval = interval
-
-    def on_epoch_end(self, args, state, control, model=None, **kwargs):
-        if model is None or int(state.epoch) % self.interval != 0:
-            return
-        backbone = model.student_backbone.eval()
-        device = next(backbone.parameters()).device
-        embeddings = []
-        with torch.no_grad():
-            for i in range(self.n_samples):
-                x = (
-                    torch.tensor(self.X_train[i], dtype=torch.float32, device=device)
-                    .unsqueeze(0)
-                    .unsqueeze(0)
-                )
-                z = backbone(x)
-                embeddings.append(z)
-        embeddings = torch.cat(embeddings)
-        mean_std = embeddings.std(dim=0).mean().item()
-        print(f"Epoch {int(state.epoch)} — Mean feature std: {mean_std:.4f}")
-
-
 def build_classifier_from_dino(
     dino_model: ECGDINO,
     n_classes: int = 5,
@@ -292,62 +228,6 @@ def build_classifier_from_dino(
     model.encoder.load_state_dict(backbone.encoder.state_dict())
     model.final_norm.load_state_dict(backbone.norm.state_dict())
     return model
-
-
-def dino_pretrain_from_datasets(
-    train_dataset,
-    valid_dataset,
-    dino_model: nn.Module,
-    training_args: TrainingArguments,
-    teacher_momentum: float = 0.996,
-):
-    """
-    Generic DINO pretraining that only depends on datasets.
-
-    Each dataset item is expected to return two augmented views, with
-    keys "x1" and "x2". This works for ECG, audio, or other 1D signals.
-    """
-    dino_trainer = Trainer(
-        model=dino_model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=valid_dataset,
-        data_collator=dino_collator,
-        callbacks=[
-            DINOTeacherUpdateCallback(momentum=teacher_momentum),
-        ],
-    )
-    dino_trainer.train()
-    return dino_trainer
-
-
-def dino_finetune_from_datasets(
-    clf_model: nn.Module,
-    train_dataset,
-    valid_dataset,
-    test_dataset,
-    training_args: TrainingArguments,
-    data_collator=cls_collator,
-    compute_metrics_fn=compute_metrics,
-):
-    """
-    Generic classifier finetuning for a DINO-initialized backbone.
-
-    Datasets are expected to return a dict with keys "x" and "labels".
-    """
-    clf_trainer = Trainer(
-        model=clf_model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=valid_dataset,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics_fn,
-    )
-    clf_trainer.train()
-
-    val_metrics = clf_trainer.evaluate()
-    test_metrics = clf_trainer.evaluate(eval_dataset=test_dataset)
-    return clf_trainer, val_metrics, test_metrics
 
 
 def main():
@@ -402,6 +282,7 @@ def main():
             dino_model=dino_model,
             training_args=pretrain_args,
             teacher_momentum=args.teacher_momentum,
+            feature_std_dataset=ECGMAEDataset(X_train),
         )
         print("DINO validation:", dino_trainer.evaluate())
     else:
@@ -409,6 +290,13 @@ def main():
 
         state_dict = load_file(args.checkpoint)
         dino_model.load_state_dict(state_dict)
+
+    mean_std = compute_feature_std(
+        dino_model.student_backbone,
+        ECGMAEDataset(X_train),
+        n_samples=min(2000, len(X_train)),
+    )
+    print(f"Post-pretrain — Mean feature std: {mean_std:.4f}")
 
     # === Zero-shot KNN + t-SNE on test set ===
     def _dino_get_embeddings(X_np: np.ndarray) -> np.ndarray:

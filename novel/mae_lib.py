@@ -151,7 +151,8 @@ def evaluate_knn_and_tsne_on_test(
     Z_tsne = tsne.fit_transform(Z_vis)
 
     plt.figure(figsize=(6, 6))
-    for c in range(5):
+    classes = sorted(set(int(c) for c in np.unique(y_vis)))
+    for c in classes:
         mask = y_vis == c
         if not np.any(mask):
             continue
@@ -173,4 +174,3 @@ __all__ = [
     "evaluate_knn_and_tsne_on_test",
     "make_training_args",
 ]
-

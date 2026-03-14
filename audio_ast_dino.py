@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import ConcatDataset
-from transformers import AutoConfig, AutoModel, Trainer, TrainerCallback
+from transformers import AutoConfig, AutoModel
 from sklearn.metrics import classification_report, confusion_matrix
 
 from common.dataloader import AudioLoader, ESC50_AUDIO_RATE
@@ -32,7 +32,13 @@ from common.lib import (
     percent_trained,
     balance_classes,
 )
-from novel.mae_lib import cls_collator
+from novel.dino_utils import (
+    DINOHead,
+    compute_feature_std,
+    dino_pretrain_from_datasets,
+    dino_finetune_from_datasets,
+)
+from novel.mae_lib import evaluate_knn_and_tsne_on_test
 from audio_ast_mae import (
     AST_MODEL_NAME,
     find_audio_files,
@@ -54,32 +60,6 @@ class AudioASTBackbone(nn.Module):
         outputs = self.model(x)
         hidden = _extract_last_hidden_state(outputs)
         return hidden.mean(dim=1)
-
-
-class DINOHead(nn.Module):
-    def __init__(
-        self,
-        in_dim: int,
-        out_dim: int = 256,
-        hidden_dim: int = 512,
-        bottleneck_dim: int = 128,
-    ):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, bottleneck_dim),
-        )
-        self.last_layer = nn.utils.weight_norm(
-            nn.Linear(bottleneck_dim, out_dim, bias=False)
-        )
-        self.last_layer.weight_g.data.fill_(1.0)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.mlp(x)
-        x = F.normalize(x, dim=-1)
-        x = self.last_layer(x)
-        return x
 
 
 class AudioASTDINO(nn.Module):
@@ -225,55 +205,6 @@ def dino_collator(batch):
     return {"x1": x1, "x2": x2}
 
 
-class DINOTeacherUpdateCallback(TrainerCallback):
-    def __init__(self, momentum: float = 0.996):
-        self.momentum = momentum
-
-    def on_step_end(self, args, state, control, model=None, **kwargs):
-        if model is not None:
-            model.update_teacher(momentum=self.momentum)
-
-
-def dino_pretrain_from_datasets(
-    train_dataset,
-    valid_dataset,
-    dino_model: nn.Module,
-    training_args,
-    teacher_momentum: float = 0.996,
-):
-    trainer = Trainer(
-        model=dino_model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=valid_dataset,
-        data_collator=dino_collator,
-        callbacks=[DINOTeacherUpdateCallback(momentum=teacher_momentum)],
-    )
-    trainer.train()
-    return trainer
-
-
-def dino_finetune_from_datasets(
-    clf_model: nn.Module,
-    train_dataset,
-    valid_dataset,
-    test_dataset,
-    training_args,
-):
-    trainer = Trainer(
-        model=clf_model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=valid_dataset,
-        data_collator=cls_collator,
-        compute_metrics=compute_metrics,
-    )
-    trainer.train()
-    val_metrics = trainer.evaluate()
-    test_metrics = trainer.evaluate(eval_dataset=test_dataset)
-    return trainer, val_metrics, test_metrics
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--audioset_dir", type=str, default="data/audioset_5000")
@@ -368,12 +299,44 @@ def main():
             dino_model=dino_model,
             training_args=pretrain_args,
             teacher_momentum=args.teacher_momentum,
+            feature_std_dataset=base_train_dataset,
         )
         print("DINO validation:")
         print(dino_trainer.evaluate())
     else:
         state_dict = torch.load(args.checkpoint, map_location="cpu")
         dino_model.load_state_dict(state_dict)
+
+    mean_std = compute_feature_std(
+        dino_model.student_backbone,
+        base_train_dataset,
+        n_samples=min(2000, len(base_train_dataset)),
+    )
+    print(f"Post-pretrain — Mean feature std: {mean_std:.4f}")
+
+    def _dino_get_embeddings(X_np: np.ndarray) -> np.ndarray:
+        dino_model.eval()
+        with torch.no_grad():
+            device = next(dino_model.parameters()).device
+            embeddings = []
+            for waveform in X_np:
+                spec = transform(torch.tensor(waveform, dtype=torch.float32), ESC50_AUDIO_RATE)
+                x = spec.to(device, dtype=torch.float32).unsqueeze(0)
+                z = dino_model.student_backbone(x)
+                embeddings.append(z.cpu())
+            return torch.cat(embeddings, dim=0).numpy()
+
+    idx2cls = {i: label for i, label in enumerate(esc50_data["label_names"])}
+    evaluate_knn_and_tsne_on_test(
+        X_train=esc50_data["X_train"],
+        y_train=esc50_data["y_train"],
+        X_test=esc50_data["X_test"],
+        y_test=esc50_data["y_test"],
+        get_embeddings=_dino_get_embeddings,
+        idx2cls=idx2cls,
+        output_dir=args.output_dir,
+        prefix="audio_dino",
+    )
 
     print("\n=== Stage 2: audio classifier finetuning ===")
     X_train = esc50_data["X_train"]
