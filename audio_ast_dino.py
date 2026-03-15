@@ -19,6 +19,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from safetensors.torch import load_file
 from torch.utils.data import ConcatDataset
 from transformers import AutoConfig, AutoModel
 from sklearn.metrics import classification_report, confusion_matrix
@@ -304,7 +305,7 @@ def main():
         print("DINO validation:")
         print(dino_trainer.evaluate())
     else:
-        state_dict = torch.load(args.checkpoint, map_location="cpu")
+        state_dict = load_file(args.checkpoint)
         dino_model.load_state_dict(state_dict)
 
     mean_std = compute_feature_std(

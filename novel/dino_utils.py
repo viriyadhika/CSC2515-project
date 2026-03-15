@@ -62,7 +62,7 @@ def compute_feature_std(backbone: nn.Module, dataset, n_samples: int) -> float:
 class DINOFeatureStdCallback(TrainerCallback):
     """Every `interval` epochs, compute mean feature std over first n_samples train embeddings."""
 
-    def __init__(self, dataset, n_samples: int = 2000, interval: int = 10):
+    def __init__(self, dataset, n_samples: int = 2000, interval: int = 1):
         self.dataset = dataset
         self.n_samples = min(n_samples, len(dataset))
         self.interval = interval

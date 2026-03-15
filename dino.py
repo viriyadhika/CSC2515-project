@@ -18,6 +18,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from safetensors.torch import load_file
 from sklearn.metrics import classification_report, confusion_matrix
 
 from common.dataloader import ECGLoader
@@ -286,8 +287,6 @@ def main():
         )
         print("DINO validation:", dino_trainer.evaluate())
     else:
-        from safetensors.torch import load_file
-
         state_dict = load_file(args.checkpoint)
         dino_model.load_state_dict(state_dict)
 
