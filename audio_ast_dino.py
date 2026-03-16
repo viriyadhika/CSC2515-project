@@ -282,6 +282,32 @@ def main():
     config = AutoConfig.from_pretrained(args.model_name)
     dino_model = AudioASTDINO(config=config, out_dim=args.out_dim)
 
+    def _dino_get_embeddings(X_np: np.ndarray) -> np.ndarray:
+        dino_model.eval()
+        with torch.no_grad():
+            device = next(dino_model.parameters()).device
+            embeddings = []
+            for waveform in X_np:
+                spec = transform(torch.tensor(waveform, dtype=torch.float32), ESC50_AUDIO_RATE)
+                x = spec.to(device, dtype=torch.float32).unsqueeze(0)
+                z = dino_model.student_backbone(x)
+                embeddings.append(z.cpu())
+            return torch.cat(embeddings, dim=0).numpy()
+
+    idx2cls = {i: label for i, label in enumerate(esc50_data["label_names"])}
+
+    print("\n=== Zero-shot KNN/t-SNE before DINO pretraining ===")
+    evaluate_knn_and_tsne_on_test(
+        X_train=esc50_data["X_train"],
+        y_train=esc50_data["y_train"],
+        X_test=esc50_data["X_test"],
+        y_test=esc50_data["y_test"],
+        get_embeddings=_dino_get_embeddings,
+        idx2cls=idx2cls,
+        output_dir=args.output_dir,
+        prefix="audio_dino_before",
+    )
+
     if args.checkpoint is None:
         pretrain_args = make_training_args(
             output_dir=str(Path(args.output_dir) / "dino_pretrain"),
@@ -315,19 +341,7 @@ def main():
     )
     print(f"Post-pretrain — Mean feature std: {mean_std:.4f}")
 
-    def _dino_get_embeddings(X_np: np.ndarray) -> np.ndarray:
-        dino_model.eval()
-        with torch.no_grad():
-            device = next(dino_model.parameters()).device
-            embeddings = []
-            for waveform in X_np:
-                spec = transform(torch.tensor(waveform, dtype=torch.float32), ESC50_AUDIO_RATE)
-                x = spec.to(device, dtype=torch.float32).unsqueeze(0)
-                z = dino_model.student_backbone(x)
-                embeddings.append(z.cpu())
-            return torch.cat(embeddings, dim=0).numpy()
-
-    idx2cls = {i: label for i, label in enumerate(esc50_data["label_names"])}
+    print("\n=== Zero-shot KNN/t-SNE after DINO pretraining ===")
     evaluate_knn_and_tsne_on_test(
         X_train=esc50_data["X_train"],
         y_train=esc50_data["y_train"],
@@ -336,7 +350,7 @@ def main():
         get_embeddings=_dino_get_embeddings,
         idx2cls=idx2cls,
         output_dir=args.output_dir,
-        prefix="audio_dino",
+        prefix="audio_dino_after",
     )
 
     print("\n=== Stage 2: audio classifier finetuning ===")

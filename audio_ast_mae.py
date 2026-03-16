@@ -583,7 +583,7 @@ def main() -> None:
         trainer.save_model(str(pretrain_dir))
         torch.save(mae_model.state_dict(), pretrain_dir / "audio_ast_mae.pt")
     else:
-        state_dict = load_file(args.checkpoint, map_location="cpu")
+        state_dict = load_file(args.checkpoint)
         mae_model.load_state_dict(state_dict)
 
     print("\n=== Zero-shot KNN/t-SNE after MAE pretraining ===")
