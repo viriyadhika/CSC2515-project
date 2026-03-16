@@ -38,7 +38,7 @@ from models.audio_common import (
     find_audio_files,
 )
 from models.dino_model import AudioASTDINO
-from novel.dino_utils import dino_collator
+from novel.dino_utils import DINOTeacherUpdateCallback, dino_collator
 from training.pretrain_loop import run_finetune, run_pretrain_loop
 
 
@@ -79,7 +79,7 @@ def main():
     parser.add_argument("--teacher_momentum", type=float, default=0.996)
     parser.add_argument("--out_dim", type=int, default=256)
     parser.add_argument("--pretrain_epochs", type=int, default=20)
-    parser.add_argument("--finetune_epochs", type=int, default=10)
+    parser.add_argument("--finetune_epochs", type=int, default=15)
     parser.add_argument("--pretrain_batch_size", type=int, default=8)
     parser.add_argument("--finetune_batch_size", type=int, default=8)
     parser.add_argument("--pretrain_lr", type=float, default=1e-4)
@@ -202,21 +202,28 @@ def main():
         print(f"Epoch {epoch} finetune validation metrics: {metrics['val_metrics']}")
         print(f"Epoch {epoch} finetune test metrics: {metrics['test_metrics']}")
 
+    pretrain_args = make_training_args(
+        output_dir=str(Path(args.output_dir) / "pretrain"),
+        epochs=args.pretrain_epochs,
+        batch_size=args.pretrain_batch_size,
+        lr=args.pretrain_lr,
+        seed=SEED,
+    )
+    pretrain_args.load_best_model_at_end = False
+    pretrain_args.metric_for_best_model = None
+    pretrain_args.weight_decay = args.weight_decay
+
     run_pretrain_loop(
         model=dino_model,
         train_dataset=dino_train_dataset,
         valid_dataset=dino_valid_dataset,
         collator=dino_collator,
-        output_dir=Path(args.output_dir) / "pretrain",
-        epochs=args.pretrain_epochs,
-        batch_size=args.pretrain_batch_size,
-        lr=args.pretrain_lr,
-        weight_decay=args.weight_decay,
+        training_args=pretrain_args,
         eval_callback=evaluate_epoch,
         checkpoint=args.checkpoint,
-        teacher_momentum=args.teacher_momentum,
         collapse_dataset=base_train_dataset,
         collapse_backbone_getter=lambda model: model.student_backbone,
+        extra_callbacks=[DINOTeacherUpdateCallback(momentum=args.teacher_momentum)],
     )
 
 

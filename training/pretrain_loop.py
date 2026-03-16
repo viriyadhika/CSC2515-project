@@ -7,9 +7,8 @@ from pathlib import Path
 import numpy as np
 import torch
 from safetensors.torch import load_file
-from torch.utils.data import DataLoader
-from transformers import Trainer
 from sklearn.metrics import classification_report, confusion_matrix
+from transformers import Trainer, TrainerCallback
 
 from common.dataloader import ESC50_AUDIO_RATE
 from common.lib import compute_metrics
@@ -24,55 +23,45 @@ from novel.mae_lib import cls_collator
 EVAL_EPOCHS = [15, 30]
 
 
-def _move_batch_to_device(batch, device):
-    moved = {}
-    for key, value in batch.items():
-        if torch.is_tensor(value):
-            moved[key] = value.to(device, non_blocking=True)
-        else:
-            moved[key] = value
-    return moved
+class MilestoneEvalCallback(TrainerCallback):
+    def __init__(self, eval_callback):
+        self.eval_callback = eval_callback
+        self.completed_epochs = set()
+
+    def on_epoch_end(self, args, state, control, model=None, **kwargs):
+        if model is None or state.epoch is None:
+            return
+        epoch = int(round(state.epoch))
+        if epoch in EVAL_EPOCHS and epoch not in self.completed_epochs:
+            self.completed_epochs.add(epoch)
+            self.eval_callback(model, epoch)
 
 
-def run_ssl_epoch(
-    model,
-    dataloader,
-    optimizer,
-    device,
-    teacher_momentum: float | None = None,
-):
-    model.train()
-    scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
-    running_loss = 0.0
+class CollapseLoggingCallback(TrainerCallback):
+    def __init__(
+        self,
+        collapse_dataset,
+        collapse_backbone_getter,
+        output_dir,
+        n_samples: int = 2000,
+    ):
+        self.collapse_dataset = collapse_dataset
+        self.collapse_backbone_getter = collapse_backbone_getter
+        self.n_samples = n_samples
+        self.output_path = Path(output_dir) / "collapse_metrics.txt"
 
-    for batch in dataloader:
-        batch = _move_batch_to_device(batch, device)
-        optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(device_type=device.type, enabled=torch.cuda.is_available()):
-            outputs = model(**batch)
-            loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        if teacher_momentum is not None and hasattr(model, "update_teacher"):
-            model.update_teacher(momentum=teacher_momentum)
-
-        running_loss += float(loss.item())
-
-    return running_loss / max(1, len(dataloader))
-
-
-def evaluate_ssl_epoch(model, dataloader, device):
-    model.eval()
-    running_loss = 0.0
-    with torch.no_grad():
-        for batch in dataloader:
-            batch = _move_batch_to_device(batch, device)
-            outputs = model(**batch)
-            loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
-            running_loss += float(loss.item())
-    return running_loss / max(1, len(dataloader))
+    def on_epoch_end(self, args, state, control, model=None, **kwargs):
+        if model is None or state.epoch is None:
+            return
+        epoch = int(round(state.epoch))
+        mean_std = compute_feature_std(
+            self.collapse_backbone_getter(model),
+            self.collapse_dataset,
+            n_samples=min(self.n_samples, len(self.collapse_dataset)),
+        )
+        print(f"Epoch {epoch}: mean_feature_std={mean_std:.6f}")
+        with self.output_path.open("a", encoding="utf-8") as f:
+            f.write(f"epoch={epoch},mean_feature_std={mean_std:.6f}\n")
 
 
 def run_finetune(
@@ -185,19 +174,15 @@ def run_pretrain_loop(
     train_dataset,
     valid_dataset,
     collator,
-    output_dir,
-    epochs,
-    batch_size,
-    lr,
-    weight_decay,
+    training_args,
     eval_callback,
-    checkpoint: str | None = None,
-    teacher_momentum: float | None = None,
     collapse_dataset=None,
     collapse_backbone_getter=None,
+    checkpoint: str | None = None,
     collapse_n_samples: int = 2000,
+    extra_callbacks=None,
 ):
-    output_path = Path(output_dir)
+    output_path = Path(training_args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     if checkpoint is not None:
@@ -207,61 +192,26 @@ def run_pretrain_loop(
             state_dict = torch.load(checkpoint, map_location="cpu")
         model.load_state_dict(state_dict)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collator,
-    )
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collator,
-    )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-    best_valid = float("inf")
-    history = []
-    collapse_log_path = output_path / "collapse_metrics.txt"
-
-    for epoch in range(1, epochs + 1):
-        train_loss = run_ssl_epoch(
-            model=model,
-            dataloader=train_loader,
-            optimizer=optimizer,
-            device=device,
-            teacher_momentum=teacher_momentum,
-        )
-        valid_loss = evaluate_ssl_epoch(model, valid_loader, device)
-        history.append(
-            {
-                "epoch": epoch,
-                "train_loss": train_loss,
-                "valid_loss": valid_loss,
-            }
-        )
-        print(f"Epoch {epoch}: train_loss={train_loss:.6f} valid_loss={valid_loss:.6f}")
-
-        if collapse_dataset is not None and collapse_backbone_getter is not None:
-            mean_std = compute_feature_std(
-                collapse_backbone_getter(model),
-                collapse_dataset,
-                n_samples=min(collapse_n_samples, len(collapse_dataset)),
+    callbacks = [MilestoneEvalCallback(eval_callback=eval_callback)]
+    if collapse_dataset is not None and collapse_backbone_getter is not None:
+        callbacks.append(
+            CollapseLoggingCallback(
+                collapse_dataset=collapse_dataset,
+                collapse_backbone_getter=collapse_backbone_getter,
+                output_dir=output_path,
+                n_samples=collapse_n_samples,
             )
-            print(f"Epoch {epoch}: mean_feature_std={mean_std:.6f}")
-            with collapse_log_path.open("a", encoding="utf-8") as f:
-                f.write(f"epoch={epoch},mean_feature_std={mean_std:.6f}\n")
+        )
+    if extra_callbacks:
+        callbacks.extend(extra_callbacks)
 
-        torch.save(model.state_dict(), output_path / "latest.pt")
-        if valid_loss < best_valid:
-            best_valid = valid_loss
-            torch.save(model.state_dict(), output_path / "best.pt")
-
-        if epoch in EVAL_EPOCHS:
-            eval_callback(model, epoch)
-
-    return history
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=valid_dataset,
+        data_collator=collator,
+        callbacks=callbacks,
+    )
+    trainer.train()
+    return trainer

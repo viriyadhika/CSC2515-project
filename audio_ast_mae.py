@@ -48,7 +48,7 @@ def main() -> None:
     parser.add_argument("--model_name", type=str, default=AST_MODEL_NAME)
     parser.add_argument("--output_dir", type=str, default="data/audio_ast_mae_runs")
     parser.add_argument("--pretrain_epochs", type=int, default=20)
-    parser.add_argument("--finetune_epochs", type=int, default=10)
+    parser.add_argument("--finetune_epochs", type=int, default=15)
     parser.add_argument("--pretrain_batch_size", type=int, default=8)
     parser.add_argument("--finetune_batch_size", type=int, default=8)
     parser.add_argument("--pretrain_lr", type=float, default=1e-4)
@@ -185,16 +185,23 @@ def main() -> None:
         print(f"Epoch {epoch} finetune validation metrics: {metrics['val_metrics']}")
         print(f"Epoch {epoch} finetune test metrics: {metrics['test_metrics']}")
 
+    pretrain_args = make_training_args(
+        output_dir=str(Path(args.output_dir) / "pretrain"),
+        epochs=args.pretrain_epochs,
+        batch_size=args.pretrain_batch_size,
+        lr=args.pretrain_lr,
+        seed=SEED,
+    )
+    pretrain_args.metric_for_best_model = "eval_loss"
+    pretrain_args.greater_is_better = False
+    pretrain_args.weight_decay = args.weight_decay
+
     run_pretrain_loop(
         model=mae_model,
         train_dataset=pretrain_train_dataset,
         valid_dataset=pretrain_valid_dataset,
         collator=mae_collator,
-        output_dir=Path(args.output_dir) / "pretrain",
-        epochs=args.pretrain_epochs,
-        batch_size=args.pretrain_batch_size,
-        lr=args.pretrain_lr,
-        weight_decay=args.weight_decay,
+        training_args=pretrain_args,
         eval_callback=evaluate_epoch,
         checkpoint=args.checkpoint,
     )
