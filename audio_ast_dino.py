@@ -2,11 +2,11 @@
 """
 DINO-style self-supervised learning for AST-shaped audio transformers.
 
-Stage 1:
-- self-supervised DINO pretraining on `data/audioset_5000` plus unlabeled ESC-50
-
-Stage 2:
-- supervised finetuning on ESC-50 using the shared AudioLoader split
+This script pretrains epoch-by-epoch and evaluates representation quality at
+epochs 15 and 30 via:
+- zero-shot KNN
+- t-SNE / PCA grouped plots
+- temporary ESC-50 finetuning from the current backbone
 """
 
 from __future__ import annotations
@@ -17,158 +17,29 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from safetensors.torch import load_file
-from torch.utils.data import ConcatDataset
-from transformers import AutoConfig, AutoModel
-from sklearn.metrics import classification_report, confusion_matrix
+from torch.utils.data import ConcatDataset, random_split
+from transformers import AutoConfig
 
 from common.dataloader import AudioLoader, ESC50_AUDIO_RATE
 from common.lib import (
     SEED,
-    seed_everything,
-    make_training_args,
-    compute_metrics,
-    percent_trained,
     balance_classes,
+    make_training_args,
+    percent_trained,
+    seed_everything,
 )
-from novel.dino_utils import (
-    DINOHead,
-    compute_feature_std,
-    dino_pretrain_from_datasets,
-    dino_finetune_from_datasets,
-)
-from novel.mae_lib import evaluate_knn_and_tsne_on_test
-from audio_ast_mae import (
+from evaluation.embedding_eval import evaluate_embedding_snapshots
+from models.audio_common import (
     AST_MODEL_NAME,
-    find_audio_files,
-    LogMelPadCrop,
     FolderAudioPretrainDataset,
-    WaveformArrayPretrainDataset,
+    LogMelPadCrop,
     WaveformArrayClassificationDataset,
-    _extract_last_hidden_state,
+    WaveformArrayPretrainDataset,
+    find_audio_files,
 )
-
-
-class AudioASTBackbone(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.model = AutoModel.from_config(config)
-        self.hidden_size = int(config.hidden_size)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        outputs = self.model(x)
-        hidden = _extract_last_hidden_state(outputs)
-        return hidden.mean(dim=1)
-
-
-class AudioASTDINO(nn.Module):
-    def __init__(self, config, out_dim: int = 256):
-        super().__init__()
-        self.base_config = config
-
-        self.student_backbone = AudioASTBackbone(config)
-        self.student_head = DINOHead(self.student_backbone.hidden_size, out_dim=out_dim)
-
-        self.teacher_backbone = AudioASTBackbone(copy.deepcopy(config))
-        self.teacher_head = DINOHead(self.teacher_backbone.hidden_size, out_dim=out_dim)
-
-        self.teacher_backbone.load_state_dict(self.student_backbone.state_dict())
-        self.teacher_head.load_state_dict(self.student_head.state_dict())
-
-        for p in self.teacher_backbone.parameters():
-            p.requires_grad = False
-        for p in self.teacher_head.parameters():
-            p.requires_grad = False
-
-        self.register_buffer("center", torch.zeros(1, out_dim))
-
-    @torch.no_grad()
-    def update_teacher(self, momentum: float = 0.996) -> None:
-        for ps, pt in zip(
-            self.student_backbone.parameters(), self.teacher_backbone.parameters()
-        ):
-            pt.data.mul_(momentum).add_(ps.data, alpha=1 - momentum)
-        for ps, pt in zip(self.student_head.parameters(), self.teacher_head.parameters()):
-            pt.data.mul_(momentum).add_(ps.data, alpha=1 - momentum)
-
-    @torch.no_grad()
-    def update_center(self, teacher_output: torch.Tensor, momentum: float = 0.9) -> None:
-        batch_center = teacher_output.mean(dim=0, keepdim=True)
-        self.center.mul_(momentum).add_(batch_center, alpha=1 - momentum)
-
-    def dino_loss(
-        self,
-        student_out: torch.Tensor,
-        teacher_out: torch.Tensor,
-        student_temp: float = 0.1,
-        teacher_temp: float = 0.04,
-    ) -> torch.Tensor:
-        student_logp = F.log_softmax(student_out / student_temp, dim=-1)
-        teacher_prob = F.softmax((teacher_out.detach() - self.center) / teacher_temp, dim=-1)
-        return torch.sum(-teacher_prob * student_logp, dim=-1).mean()
-
-    def forward(self, x1=None, x2=None, **kwargs):
-        if x1 is None:
-            x1 = kwargs.get("x1")
-        if x2 is None:
-            x2 = kwargs.get("x2")
-        if x1 is None or x2 is None:
-            raise ValueError("AudioASTDINO expects x1 and x2")
-
-        student_feat = self.student_backbone(x1)
-        student_out = self.student_head(student_feat)
-
-        with torch.no_grad():
-            teacher_feat = self.teacher_backbone(x2)
-            teacher_out = self.teacher_head(teacher_feat)
-
-        loss = self.dino_loss(student_out, teacher_out)
-
-        with torch.no_grad():
-            self.update_center(teacher_out)
-
-        return {"loss": loss, "logits": student_out}
-
-    def build_classifier(
-        self,
-        n_classes: int,
-        class_weights: torch.Tensor | None = None,
-    ):
-        backbone_config = self.base_config.__class__.from_dict(self.base_config.to_dict())
-        backbone = AutoModel.from_config(backbone_config)
-        backbone.load_state_dict(self.student_backbone.model.state_dict(), strict=False)
-        return AudioASTDINOClassifier(
-            backbone=backbone,
-            hidden_size=self.student_backbone.hidden_size,
-            n_classes=n_classes,
-            class_weights=class_weights,
-        )
-
-
-class AudioASTDINOClassifier(nn.Module):
-    def __init__(
-        self,
-        backbone: nn.Module,
-        hidden_size: int,
-        n_classes: int,
-        class_weights: torch.Tensor | None = None,
-    ):
-        super().__init__()
-        self.backbone = backbone
-        self.head = nn.Linear(hidden_size, n_classes)
-        self.loss_fn = nn.CrossEntropyLoss(weight=class_weights)
-
-    def forward(self, x=None, labels=None):
-        outputs = self.backbone(x)
-        hidden = _extract_last_hidden_state(outputs)
-        pooled = hidden.mean(dim=1)
-        logits = self.head(pooled)
-        loss = None
-        if labels is not None:
-            loss = self.loss_fn(logits, labels)
-        return {"loss": loss, "logits": logits}
+from models.dino_model import AudioASTDINO
+from novel.dino_utils import dino_collator
+from training.pretrain_loop import run_finetune, run_pretrain_loop
 
 
 class AudioDINOPretrainDataset(torch.utils.data.Dataset):
@@ -200,12 +71,6 @@ class AudioDINOPretrainDataset(torch.utils.data.Dataset):
         return {"x1": self.augment(x), "x2": self.augment(x)}
 
 
-def dino_collator(batch):
-    x1 = torch.stack([b["x1"] for b in batch])
-    x2 = torch.stack([b["x2"] for b in batch])
-    return {"x1": x1, "x2": x2}
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--audioset_dir", type=str, default="data/audioset_5000")
@@ -225,12 +90,7 @@ def main():
     parser.add_argument("--sample_rate", type=int, default=16000)
     parser.add_argument("--dataset_mean", type=float, default=-4.2677393)
     parser.add_argument("--dataset_std", type=float, default=4.5689974)
-    parser.add_argument(
-        "--percent_train",
-        type=float,
-        default=100.0,
-        help="Percent of labeled training data to use for finetuning (0-100)",
-    )
+    parser.add_argument("--percent_train", type=float, default=100.0)
     parser.add_argument("--balance_target_size", type=int, default=None)
     parser.add_argument("--checkpoint", type=str, default=None)
     args = parser.parse_args()
@@ -270,165 +130,92 @@ def main():
     full_dataset = ConcatDataset(datasets)
     valid_size = max(1, int(0.1 * len(full_dataset)))
     train_size = len(full_dataset) - valid_size
-    base_train_dataset, base_valid_dataset = torch.utils.data.random_split(
+    base_train_dataset, base_valid_dataset = random_split(
         full_dataset,
         [train_size, valid_size],
         generator=torch.Generator().manual_seed(SEED),
     )
-
     dino_train_dataset = AudioDINOPretrainDataset(base_train_dataset)
     dino_valid_dataset = AudioDINOPretrainDataset(base_valid_dataset)
 
-    config = AutoConfig.from_pretrained(args.model_name)
-    dino_model = AudioASTDINO(config=config, out_dim=args.out_dim)
-
-    def _dino_get_embeddings(X_np: np.ndarray) -> np.ndarray:
-        dino_model.eval()
-        with torch.no_grad():
-            device = next(dino_model.parameters()).device
-            embeddings = []
-            for waveform in X_np:
-                spec = transform(torch.tensor(waveform, dtype=torch.float32), ESC50_AUDIO_RATE)
-                x = spec.to(device, dtype=torch.float32).unsqueeze(0)
-                z = dino_model.student_backbone(x)
-                embeddings.append(z.cpu())
-            return torch.cat(embeddings, dim=0).numpy()
-
-    idx2cls = {i: label for i, label in enumerate(esc50_data["label_names"])}
-
-    print("\n=== Zero-shot KNN/t-SNE before DINO pretraining ===")
-    evaluate_knn_and_tsne_on_test(
-        X_train=esc50_data["X_train"],
-        y_train=esc50_data["y_train"],
-        X_test=esc50_data["X_test"],
-        y_test=esc50_data["y_test"],
-        get_embeddings=_dino_get_embeddings,
-        idx2cls=idx2cls,
-        output_dir=args.output_dir,
-        prefix="audio_dino_before",
-    )
-
-    if args.checkpoint is None:
-        pretrain_args = make_training_args(
-            output_dir=str(Path(args.output_dir) / "dino_pretrain"),
-            epochs=args.pretrain_epochs,
-            batch_size=args.pretrain_batch_size,
-            lr=args.pretrain_lr,
-            seed=SEED,
-        )
-        pretrain_args.load_best_model_at_end = False
-        pretrain_args.metric_for_best_model = None
-        pretrain_args.weight_decay = args.weight_decay
-
-        dino_trainer = dino_pretrain_from_datasets(
-            train_dataset=dino_train_dataset,
-            valid_dataset=dino_valid_dataset,
-            dino_model=dino_model,
-            training_args=pretrain_args,
-            teacher_momentum=args.teacher_momentum,
-            feature_std_dataset=base_train_dataset,
-        )
-        print("DINO validation:")
-        print(dino_trainer.evaluate())
-    else:
-        state_dict = load_file(args.checkpoint)
-        dino_model.load_state_dict(state_dict)
-
-    mean_std = compute_feature_std(
-        dino_model.student_backbone,
-        base_train_dataset,
-        n_samples=min(2000, len(base_train_dataset)),
-    )
-    print(f"Post-pretrain — Mean feature std: {mean_std:.4f}")
-
-    print("\n=== Zero-shot KNN/t-SNE after DINO pretraining ===")
-    evaluate_knn_and_tsne_on_test(
-        X_train=esc50_data["X_train"],
-        y_train=esc50_data["y_train"],
-        X_test=esc50_data["X_test"],
-        y_test=esc50_data["y_test"],
-        get_embeddings=_dino_get_embeddings,
-        idx2cls=idx2cls,
-        output_dir=args.output_dir,
-        prefix="audio_dino_after",
-    )
-
-    print("\n=== Stage 2: audio classifier finetuning ===")
-    X_train = esc50_data["X_train"]
-    X_valid = esc50_data["X_valid"]
-    X_test = esc50_data["X_test"]
-    y_train = esc50_data["y_train"]
-    y_valid = esc50_data["y_valid"]
-    y_test = esc50_data["y_test"]
-    label_names = esc50_data["label_names"]
-    n_classes = int(esc50_data["n_classes"])
-
-    X_train, y_train = percent_trained(X_train, y_train, args)
+    finetune_data = copy.deepcopy(esc50_data)
+    x_train, y_train = percent_trained(finetune_data["X_train"], finetune_data["y_train"], args)
     if args.balance_target_size is not None:
-        X_train, y_train = balance_classes(
-            X_train,
+        x_train, y_train = balance_classes(
+            x_train,
             y_train,
             target_size=args.balance_target_size,
             seed=SEED,
-            n_classes=n_classes,
+            n_classes=int(finetune_data["n_classes"]),
         )
+    finetune_data["X_train"] = x_train
+    finetune_data["y_train"] = y_train
 
-    train_dataset = WaveformArrayClassificationDataset(
-        X_train, y_train, source_rate=ESC50_AUDIO_RATE, transform=transform
+    embedding_train_dataset = WaveformArrayClassificationDataset(
+        finetune_data["X_train"],
+        finetune_data["y_train"],
+        source_rate=ESC50_AUDIO_RATE,
+        transform=transform,
     )
-    valid_dataset = WaveformArrayClassificationDataset(
-        X_valid, y_valid, source_rate=ESC50_AUDIO_RATE, transform=transform
-    )
-    test_dataset = WaveformArrayClassificationDataset(
-        X_test, y_test, source_rate=ESC50_AUDIO_RATE, transform=transform
-    )
-
-    class_counts = np.bincount(y_train, minlength=n_classes).astype(np.float32)
-    class_weights_np = class_counts.sum() / (len(class_counts) * class_counts + 1e-8)
-    class_weights = torch.tensor(class_weights_np, dtype=torch.float32)
-
-    clf_model = dino_model.build_classifier(
-        n_classes=n_classes,
-        class_weights=class_weights,
+    embedding_test_dataset = WaveformArrayClassificationDataset(
+        finetune_data["X_test"],
+        finetune_data["y_test"],
+        source_rate=ESC50_AUDIO_RATE,
+        transform=transform,
     )
 
-    finetune_args = make_training_args(
-        output_dir=str(Path(args.output_dir) / "finetune"),
-        epochs=args.finetune_epochs,
-        batch_size=args.finetune_batch_size,
-        lr=args.finetune_lr,
-        seed=SEED,
-    )
-    finetune_args.metric_for_best_model = "macro_f1"
-    finetune_args.greater_is_better = True
+    config = AutoConfig.from_pretrained(args.model_name)
+    dino_model = AudioASTDINO(config=config, out_dim=args.out_dim)
+    idx2cls = {i: label for i, label in enumerate(finetune_data["label_names"])}
 
-    clf_trainer, val_metrics, test_metrics = dino_finetune_from_datasets(
-        clf_model=clf_model,
-        train_dataset=train_dataset,
-        valid_dataset=valid_dataset,
-        test_dataset=test_dataset,
-        training_args=finetune_args,
-    )
-
-    print("Validation metrics:")
-    print(val_metrics)
-    print("Test metrics:")
-    print(test_metrics)
-
-    pred_output = clf_trainer.predict(test_dataset)
-    y_pred = np.argmax(pred_output.predictions, axis=1)
-    y_true = pred_output.label_ids
-    label_ids = list(range(n_classes))
-    print(
-        classification_report(
-            y_true,
-            y_pred,
-            labels=label_ids,
-            target_names=label_names,
-            zero_division=0,
+    def evaluate_epoch(model, epoch: int) -> None:
+        epoch_dir = Path(args.output_dir) / f"epoch_{epoch}"
+        backbone = model.clone_backbone()
+        snapshot = evaluate_embedding_snapshots(
+            backbone=backbone,
+            train_dataset=embedding_train_dataset,
+            y_train=finetune_data["y_train"],
+            test_dataset=embedding_test_dataset,
+            y_test=finetune_data["y_test"],
+            output_dir=epoch_dir,
+            idx2cls=idx2cls,
+            batch_size=max(args.pretrain_batch_size, args.finetune_batch_size),
         )
+        print(f"Epoch {epoch} KNN accuracy: {snapshot['knn_accuracy']:.4f}")
+
+        finetune_args = make_training_args(
+            output_dir=str(epoch_dir),
+            epochs=args.finetune_epochs,
+            batch_size=args.finetune_batch_size,
+            lr=args.finetune_lr,
+            seed=SEED,
+        )
+        finetune_args.metric_for_best_model = "macro_f1"
+        finetune_args.greater_is_better = True
+        metrics = run_finetune(
+            backbone=backbone,
+            esc50_data=finetune_data,
+            training_args=finetune_args,
+            transform=transform,
+            output_dir=epoch_dir,
+        )
+        print(f"Epoch {epoch} finetune validation metrics: {metrics['val_metrics']}")
+        print(f"Epoch {epoch} finetune test metrics: {metrics['test_metrics']}")
+
+    run_pretrain_loop(
+        model=dino_model,
+        train_dataset=dino_train_dataset,
+        valid_dataset=dino_valid_dataset,
+        collator=dino_collator,
+        output_dir=Path(args.output_dir) / "pretrain",
+        epochs=args.pretrain_epochs,
+        batch_size=args.pretrain_batch_size,
+        lr=args.pretrain_lr,
+        weight_decay=args.weight_decay,
+        eval_callback=evaluate_epoch,
+        checkpoint=args.checkpoint,
+        teacher_momentum=args.teacher_momentum,
     )
-    print(confusion_matrix(y_true, y_pred, labels=label_ids))
 
 
 if __name__ == "__main__":
