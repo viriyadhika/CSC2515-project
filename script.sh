@@ -19,6 +19,11 @@ python3 audio_ast.py \
   --epochs 1 \
   --finetune > pretrain_smoke.log
 
+echo "=== Scratch AST smoke test: 1 epoch ==="
+python3 audio_ast.py \
+  --output_dir data/audio_ast_scratch_runs_smoke \
+  --epochs 1 > scratch_smoke.log
+
 echo "=== MAE full run: 30 pretrain epochs ==="
 python3 audio_ast_mae.py \
   --output_dir data/audio_ast_mae_runs_full \
@@ -34,3 +39,8 @@ python3 audio_ast.py \
   --output_dir data/audio_ast_runs_full \
   --epochs 15 \
   --finetune > pretrained_15.log
+
+echo "=== Scratch AST full run: 15 epochs ==="
+python3 audio_ast.py \
+  --output_dir data/audio_ast_scratch_runs_full \
+  --epochs 15 > scratch_15.log

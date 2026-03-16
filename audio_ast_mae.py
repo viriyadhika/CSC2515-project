@@ -87,10 +87,7 @@ def main() -> None:
         print(f"No audio files found in {args.audioset_dir}, skipping that source.")
 
     esc50_data = AudioLoader(args).load()
-    esc50_waveforms = np.concatenate(
-        [esc50_data["X_train"], esc50_data["X_valid"], esc50_data["X_test"]],
-        axis=0,
-    )
+    esc50_waveforms = esc50_data["X_train"]
     datasets.append(
         WaveformArrayPretrainDataset(
             esc50_waveforms,
@@ -98,7 +95,7 @@ def main() -> None:
             transform=transform,
         )
     )
-    print(f"Loaded {len(esc50_waveforms)} ESC-50 clips from AudioLoader.")
+    print(f"Loaded {len(esc50_waveforms)} ESC-50 train clips from AudioLoader.")
 
     if not datasets:
         raise RuntimeError("No audio sources available for pretraining.")
@@ -150,6 +147,19 @@ def main() -> None:
     )
 
     idx2cls = {i: label for i, label in enumerate(finetune_data["label_names"])}
+
+    initial_dir = Path(args.output_dir) / "epoch_0"
+    initial_snapshot = evaluate_embedding_snapshots(
+        backbone=mae_model.clone_backbone(),
+        train_dataset=embedding_train_dataset,
+        y_train=finetune_data["y_train"],
+        test_dataset=embedding_test_dataset,
+        y_test=finetune_data["y_test"],
+        output_dir=initial_dir,
+        idx2cls=idx2cls,
+        batch_size=max(args.pretrain_batch_size, args.finetune_batch_size),
+    )
+    print(f"Initial KNN accuracy: {initial_snapshot['knn_accuracy']:.4f}")
 
     def evaluate_epoch(model, epoch: int) -> None:
         epoch_dir = Path(args.output_dir) / f"epoch_{epoch}"

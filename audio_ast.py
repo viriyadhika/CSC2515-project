@@ -205,6 +205,21 @@ def main():
         )
         model = AutoModelForAudioClassification.from_config(config)
 
+    initial_dir = Path(args.output_dir) / "epoch_0"
+    initial_backbone = model.audio_spectrogram_transformer
+    initial_snapshot = evaluate_embedding_snapshots(
+        backbone=initial_backbone,
+        train_dataset=train_dataset,
+        y_train=y_train,
+        test_dataset=test_dataset,
+        y_test=y_test,
+        output_dir=initial_dir,
+        idx2cls={i: label_names[i] for i in range(n_classes)},
+        batch_size=args.batch_size,
+        input_key="input_values",
+    )
+    print(f"Initial KNN accuracy: {initial_snapshot['knn_accuracy']:.4f}")
+
     for epoch in range(1, args.epochs + 1):
         training_args = make_training_args(
             output_dir=str(Path(args.output_dir) / f"epoch_{epoch}" / "trainer"),
