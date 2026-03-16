@@ -17,6 +17,7 @@ from models.audio_common import (
     WaveformArrayClassificationDataset,
     build_audio_classifier_from_backbone,
 )
+from novel.dino_utils import compute_feature_std
 from novel.mae_lib import cls_collator
 
 
@@ -192,6 +193,9 @@ def run_pretrain_loop(
     eval_callback,
     checkpoint: str | None = None,
     teacher_momentum: float | None = None,
+    collapse_dataset=None,
+    collapse_backbone_getter=None,
+    collapse_n_samples: int = 2000,
 ):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -222,6 +226,7 @@ def run_pretrain_loop(
 
     best_valid = float("inf")
     history = []
+    collapse_log_path = output_path / "collapse_metrics.txt"
 
     for epoch in range(1, epochs + 1):
         train_loss = run_ssl_epoch(
@@ -240,6 +245,16 @@ def run_pretrain_loop(
             }
         )
         print(f"Epoch {epoch}: train_loss={train_loss:.6f} valid_loss={valid_loss:.6f}")
+
+        if collapse_dataset is not None and collapse_backbone_getter is not None:
+            mean_std = compute_feature_std(
+                collapse_backbone_getter(model),
+                collapse_dataset,
+                n_samples=min(collapse_n_samples, len(collapse_dataset)),
+            )
+            print(f"Epoch {epoch}: mean_feature_std={mean_std:.6f}")
+            with collapse_log_path.open("a", encoding="utf-8") as f:
+                f.write(f"epoch={epoch},mean_feature_std={mean_std:.6f}\n")
 
         torch.save(model.state_dict(), output_path / "latest.pt")
         if valid_loss < best_valid:

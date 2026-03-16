@@ -215,6 +215,8 @@ def main():
         eval_callback=evaluate_epoch,
         checkpoint=args.checkpoint,
         teacher_momentum=args.teacher_momentum,
+        collapse_dataset=base_train_dataset,
+        collapse_backbone_getter=lambda model: model.student_backbone,
     )
 
 
