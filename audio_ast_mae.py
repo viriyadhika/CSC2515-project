@@ -25,6 +25,8 @@ import torchaudio
 from torch.utils.data import ConcatDataset
 from transformers import AutoConfig, AutoModel, Trainer
 
+from safetensors.torch import load_file
+
 from common.dataloader import AudioLoader, ESC50_AUDIO_RATE
 from common.lib import (
     SEED,
@@ -35,7 +37,11 @@ from common.lib import (
     balance_classes,
 )
 from mae_freq import SpectrogramLayout, mae_forward_loss
-from novel.mae_lib import mae_collator, cls_collator
+from novel.mae_lib import (
+    mae_collator,
+    cls_collator,
+    evaluate_knn_and_tsne_on_test,
+)
 from sklearn.metrics import classification_report, confusion_matrix
 
 
@@ -422,6 +428,25 @@ def mae_finetune_from_datasets(
     return trainer, val_metrics, test_metrics
 
 
+def get_audio_ast_embeddings(
+    backbone: nn.Module,
+    transform: LogMelPadCrop,
+    waveforms: np.ndarray,
+    source_rate: int,
+) -> np.ndarray:
+    backbone.eval()
+    device = next(backbone.parameters()).device
+    embeddings = []
+    with torch.no_grad():
+        for waveform in waveforms:
+            spec = transform(torch.tensor(waveform, dtype=torch.float32), source_rate)
+            x = spec.to(device, dtype=torch.float32).unsqueeze(0)
+            outputs = backbone(x)
+            hidden = _extract_last_hidden_state(outputs)
+            embeddings.append(hidden.mean(dim=1).cpu())
+    return torch.cat(embeddings, dim=0).numpy()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--audioset_dir", type=str, default="data/audioset_5000")
@@ -512,6 +537,25 @@ def main() -> None:
         decoder_dim=args.decoder_dim,
     )
 
+    idx2cls = {i: label for i, label in enumerate(esc50_data["label_names"])}
+
+    print("\n=== Zero-shot KNN/t-SNE before MAE pretraining ===")
+    evaluate_knn_and_tsne_on_test(
+        X_train=esc50_data["X_train"],
+        y_train=esc50_data["y_train"],
+        X_test=esc50_data["X_test"],
+        y_test=esc50_data["y_test"],
+        get_embeddings=lambda X_np: get_audio_ast_embeddings(
+            mae_model.backbone,
+            transform,
+            X_np,
+            ESC50_AUDIO_RATE,
+        ),
+        idx2cls=idx2cls,
+        output_dir=args.output_dir,
+        prefix="audio_mae_before",
+    )
+
     pretrain_args = make_training_args(
         output_dir=str(Path(args.output_dir) / "pretrain"),
         epochs=args.pretrain_epochs,
@@ -539,8 +583,25 @@ def main() -> None:
         trainer.save_model(str(pretrain_dir))
         torch.save(mae_model.state_dict(), pretrain_dir / "audio_ast_mae.pt")
     else:
-        state_dict = torch.load(args.checkpoint, map_location="cpu")
+        state_dict = load_file(args.checkpoint, map_location="cpu")
         mae_model.load_state_dict(state_dict)
+
+    print("\n=== Zero-shot KNN/t-SNE after MAE pretraining ===")
+    evaluate_knn_and_tsne_on_test(
+        X_train=esc50_data["X_train"],
+        y_train=esc50_data["y_train"],
+        X_test=esc50_data["X_test"],
+        y_test=esc50_data["y_test"],
+        get_embeddings=lambda X_np: get_audio_ast_embeddings(
+            mae_model.backbone,
+            transform,
+            X_np,
+            ESC50_AUDIO_RATE,
+        ),
+        idx2cls=idx2cls,
+        output_dir=args.output_dir,
+        prefix="audio_mae_after",
+    )
 
     print("\n=== Stage 2: audio classifier finetuning ===")
     X_train = esc50_data["X_train"]
