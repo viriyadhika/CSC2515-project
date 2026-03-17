@@ -42,6 +42,16 @@ from novel.dino_utils import DINOTeacherUpdateCallback, dino_collator
 from training.pretrain_loop import run_finetune, run_pretrain_loop
 
 
+def load_checkpoint_into_model(model, checkpoint_path: str) -> None:
+    if checkpoint_path.endswith(".safetensors"):
+        from safetensors.torch import load_file
+
+        state_dict = load_file(checkpoint_path)
+    else:
+        state_dict = torch.load(checkpoint_path, map_location="cpu")
+    model.load_state_dict(state_dict)
+
+
 class AudioDINOPretrainDataset(torch.utils.data.Dataset):
     def __init__(self, base_dataset):
         self.base_dataset = base_dataset
@@ -163,6 +173,9 @@ def main():
 
     config = AutoConfig.from_pretrained(args.model_name)
     dino_model = AudioASTDINO(config=config, out_dim=args.out_dim)
+    if args.checkpoint is not None:
+        load_checkpoint_into_model(dino_model, args.checkpoint)
+        print(f"Loaded model from checkpoint: {args.checkpoint}")
     idx2cls = {i: label for i, label in enumerate(finetune_data["label_names"])}
 
     initial_dir = Path(args.output_dir) / "epoch_0"
@@ -230,7 +243,6 @@ def main():
         collator=dino_collator,
         training_args=pretrain_args,
         eval_callback=evaluate_epoch,
-        checkpoint=args.checkpoint,
         collapse_dataset=base_train_dataset,
         collapse_backbone_getter=lambda model: model.student_backbone,
         extra_callbacks=[DINOTeacherUpdateCallback(momentum=args.teacher_momentum)],

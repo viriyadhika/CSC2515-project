@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from safetensors.torch import load_file
 from torch.utils.data import ConcatDataset, random_split
 from transformers import AutoConfig
 
@@ -40,6 +41,14 @@ from models.audio_common import (
 from models.mae_model import AudioASTMAE
 from novel.mae_lib import mae_collator
 from training.pretrain_loop import run_finetune, run_pretrain_loop
+
+
+def load_checkpoint_into_model(model, checkpoint_path: str) -> None:
+    if checkpoint_path.endswith(".safetensors"):
+        state_dict = load_file(checkpoint_path)
+    else:
+        state_dict = torch.load(checkpoint_path, map_location="cpu")
+    model.load_state_dict(state_dict)
 
 
 def main() -> None:
@@ -66,6 +75,8 @@ def main() -> None:
     parser.add_argument("--percent_train", type=float, default=100.0)
     parser.add_argument("--balance_target_size", type=int, default=None)
     parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--esc50_only_pretrain", action="store_true")
+    parser.add_argument("--run_final_finetune", action="store_true")
     args = parser.parse_args()
 
     seed_everything(SEED)
@@ -79,12 +90,16 @@ def main() -> None:
     )
 
     datasets = []
-    audioset_files = find_audio_files(args.audioset_dir)
-    if audioset_files:
-        datasets.append(FolderAudioPretrainDataset(audioset_files, transform))
-        print(f"Found {len(audioset_files)} audio files in {args.audioset_dir}")
+    audioset_files = []
+    if args.esc50_only_pretrain:
+        print("ESC50-only pretraining enabled, skipping AudioSet source.")
     else:
-        print(f"No audio files found in {args.audioset_dir}, skipping that source.")
+        audioset_files = find_audio_files(args.audioset_dir)
+        if audioset_files:
+            datasets.append(FolderAudioPretrainDataset(audioset_files, transform))
+            print(f"Found {len(audioset_files)} audio files in {args.audioset_dir}")
+        else:
+            print(f"No audio files found in {args.audioset_dir}, skipping that source.")
 
     esc50_data = AudioLoader(args).load()
     esc50_waveforms = esc50_data["X_train"]
@@ -145,6 +160,9 @@ def main() -> None:
         mask_patch=args.mask_patch,
         decoder_dim=args.decoder_dim,
     )
+    if args.checkpoint is not None:
+        load_checkpoint_into_model(mae_model, args.checkpoint)
+        print(f"Loaded model from checkpoint: {args.checkpoint}")
 
     idx2cls = {i: label for i, label in enumerate(finetune_data["label_names"])}
 
@@ -206,15 +224,36 @@ def main() -> None:
     pretrain_args.greater_is_better = False
     pretrain_args.weight_decay = args.weight_decay
 
-    run_pretrain_loop(
-        model=mae_model,
-        train_dataset=pretrain_train_dataset,
-        valid_dataset=pretrain_valid_dataset,
-        collator=mae_collator,
-        training_args=pretrain_args,
-        eval_callback=evaluate_epoch,
-        checkpoint=args.checkpoint,
-    )
+    if args.pretrain_epochs > 0:
+        run_pretrain_loop(
+            model=mae_model,
+            train_dataset=pretrain_train_dataset,
+            valid_dataset=pretrain_valid_dataset,
+            collator=mae_collator,
+            training_args=pretrain_args,
+            eval_callback=evaluate_epoch,
+        )
+
+    if args.run_final_finetune and args.finetune_epochs > 0:
+        final_dir = Path(args.output_dir) / "final_finetune"
+        final_args = make_training_args(
+            output_dir=str(final_dir),
+            epochs=args.finetune_epochs,
+            batch_size=args.finetune_batch_size,
+            lr=args.finetune_lr,
+            seed=SEED,
+        )
+        final_args.metric_for_best_model = "macro_f1"
+        final_args.greater_is_better = True
+        metrics = run_finetune(
+            backbone=mae_model.clone_backbone(),
+            esc50_data=finetune_data,
+            training_args=final_args,
+            transform=transform,
+            output_dir=final_dir,
+        )
+        print(f"Final finetune validation metrics: {metrics['val_metrics']}")
+        print(f"Final finetune test metrics: {metrics['test_metrics']}")
 
 
 if __name__ == "__main__":
