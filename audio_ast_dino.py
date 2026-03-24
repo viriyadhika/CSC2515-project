@@ -2,11 +2,10 @@
 """
 DINO-style self-supervised learning for AST-shaped audio transformers.
 
-This script pretrains epoch-by-epoch and evaluates representation quality at
-epochs 15 and 30 via:
-- zero-shot KNN
-- t-SNE / PCA grouped plots
-- temporary ESC-50 finetuning from the current backbone
+Pre-trains for --pretrain_epochs epochs, evaluating KNN at epochs 15 and 30,
+then runs a single --finetune_epochs supervised finetune from the pre-trained
+backbone. All metrics are written to {output_dir}/metrics.json and per-epoch
+finetune logs are available in {output_dir}/final_finetune/trainer_state.json.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ import argparse
 import copy
 from pathlib import Path
 
-import numpy as np
 import torch
 from torch.utils.data import ConcatDataset, random_split
 from transformers import AutoConfig
@@ -28,6 +26,7 @@ from common.lib import (
     percent_trained,
     seed_everything,
 )
+from common.metrics_logger import MetricsLogger
 from evaluation.embedding_eval import evaluate_embedding_snapshots
 from models.audio_common import (
     AST_MODEL_NAME,
@@ -45,7 +44,6 @@ from training.pretrain_loop import run_finetune, run_pretrain_loop
 def load_checkpoint_into_model(model, checkpoint_path: str) -> None:
     if checkpoint_path.endswith(".safetensors"):
         from safetensors.torch import load_file
-
         state_dict = load_file(checkpoint_path)
     else:
         state_dict = torch.load(checkpoint_path, map_location="cpu")
@@ -85,11 +83,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--audioset_dir", type=str, default="data/audioset_5000")
     parser.add_argument("--model_name", type=str, default=AST_MODEL_NAME)
-    parser.add_argument("--output_dir", type=str, default="data/audio_ast_dino_runs")
+    parser.add_argument("--output_dir", type=str, default="data/runs/dino")
     parser.add_argument("--teacher_momentum", type=float, default=0.996)
     parser.add_argument("--out_dim", type=int, default=256)
-    parser.add_argument("--pretrain_epochs", type=int, default=20)
-    parser.add_argument("--finetune_epochs", type=int, default=15)
+    parser.add_argument("--pretrain_epochs", type=int, default=30)
+    parser.add_argument("--finetune_epochs", type=int, default=45)
     parser.add_argument("--pretrain_batch_size", type=int, default=8)
     parser.add_argument("--finetune_batch_size", type=int, default=8)
     parser.add_argument("--pretrain_lr", type=float, default=1e-4)
@@ -106,6 +104,7 @@ def main():
     args = parser.parse_args()
 
     seed_everything(SEED)
+    metrics_logger = MetricsLogger(args.output_dir)
 
     transform = LogMelPadCrop(
         sample_rate=args.sample_rate,
@@ -121,7 +120,7 @@ def main():
         datasets.append(FolderAudioPretrainDataset(audioset_files, transform))
         print(f"Found {len(audioset_files)} audio files in {args.audioset_dir}")
     else:
-        print(f"No audio files found in {args.audioset_dir}, skipping that source.")
+        print(f"No audio files found in {args.audioset_dir}, skipping.")
 
     esc50_data = AudioLoader(args).load()
     esc50_waveforms = esc50_data["X_train"]
@@ -132,7 +131,7 @@ def main():
             transform=transform,
         )
     )
-    print(f"Loaded {len(esc50_waveforms)} ESC-50 train clips from AudioLoader.")
+    print(f"Loaded {len(esc50_waveforms)} ESC-50 train clips for pre-training.")
 
     full_dataset = ConcatDataset(datasets)
     valid_size = max(1, int(0.1 * len(full_dataset)))
@@ -170,61 +169,46 @@ def main():
         source_rate=ESC50_AUDIO_RATE,
         transform=transform,
     )
+    idx2cls = {i: label for i, label in enumerate(finetune_data["label_names"])}
 
     config = AutoConfig.from_pretrained(args.model_name)
     dino_model = AudioASTDINO(config=config, out_dim=args.out_dim)
     if args.checkpoint is not None:
         load_checkpoint_into_model(dino_model, args.checkpoint)
         print(f"Loaded model from checkpoint: {args.checkpoint}")
-    idx2cls = {i: label for i, label in enumerate(finetune_data["label_names"])}
 
-    initial_dir = Path(args.output_dir) / "epoch_0"
+    # Initial KNN before any training
     initial_snapshot = evaluate_embedding_snapshots(
         backbone=dino_model.clone_backbone(),
         train_dataset=embedding_train_dataset,
         y_train=finetune_data["y_train"],
         test_dataset=embedding_test_dataset,
         y_test=finetune_data["y_test"],
-        output_dir=initial_dir,
+        output_dir=Path(args.output_dir) / "epoch_0",
         idx2cls=idx2cls,
         batch_size=max(args.pretrain_batch_size, args.finetune_batch_size),
+        skip_viz=True,
     )
+    metrics_logger.set("initial_knn_acc", initial_snapshot["knn_accuracy"])
     print(f"Initial KNN accuracy: {initial_snapshot['knn_accuracy']:.4f}")
 
     def evaluate_epoch(model, epoch: int) -> None:
-        epoch_dir = Path(args.output_dir) / f"epoch_{epoch}"
-        backbone = model.clone_backbone()
+        """KNN-only milestone evaluation during pre-training."""
         snapshot = evaluate_embedding_snapshots(
-            backbone=backbone,
+            backbone=model.clone_backbone(),
             train_dataset=embedding_train_dataset,
             y_train=finetune_data["y_train"],
             test_dataset=embedding_test_dataset,
             y_test=finetune_data["y_test"],
-            output_dir=epoch_dir,
+            output_dir=Path(args.output_dir) / f"epoch_{epoch}",
             idx2cls=idx2cls,
             batch_size=max(args.pretrain_batch_size, args.finetune_batch_size),
+            skip_viz=True,
         )
+        metrics_logger.set_milestone(epoch=epoch, knn_acc=snapshot["knn_accuracy"])
         print(f"Epoch {epoch} KNN accuracy: {snapshot['knn_accuracy']:.4f}")
 
-        finetune_args = make_training_args(
-            output_dir=str(epoch_dir),
-            epochs=args.finetune_epochs,
-            batch_size=args.finetune_batch_size,
-            lr=args.finetune_lr,
-            seed=SEED,
-        )
-        finetune_args.metric_for_best_model = "macro_f1"
-        finetune_args.greater_is_better = True
-        metrics = run_finetune(
-            backbone=backbone,
-            esc50_data=finetune_data,
-            training_args=finetune_args,
-            transform=transform,
-            output_dir=epoch_dir,
-        )
-        print(f"Epoch {epoch} finetune validation metrics: {metrics['val_metrics']}")
-        print(f"Epoch {epoch} finetune test metrics: {metrics['test_metrics']}")
-
+    # Pre-training
     pretrain_args = make_training_args(
         output_dir=str(Path(args.output_dir) / "pretrain"),
         epochs=args.pretrain_epochs,
@@ -247,6 +231,37 @@ def main():
         collapse_backbone_getter=lambda model: model.student_backbone,
         extra_callbacks=[DINOTeacherUpdateCallback(momentum=args.teacher_momentum)],
     )
+
+    # Final supervised fine-tune (single run, full budget)
+    if args.finetune_epochs > 0:
+        final_dir = Path(args.output_dir) / "final_finetune"
+        final_args = make_training_args(
+            output_dir=str(final_dir),
+            epochs=args.finetune_epochs,
+            batch_size=args.finetune_batch_size,
+            lr=args.finetune_lr,
+            seed=SEED,
+        )
+        final_args.metric_for_best_model = "eval_loss"
+        final_args.greater_is_better = False
+
+        result = run_finetune(
+            backbone=dino_model.clone_backbone(),
+            esc50_data=finetune_data,
+            training_args=final_args,
+            transform=transform,
+            output_dir=final_dir,
+        )
+        val_m = result["val_metrics"]
+        test_m = result["test_metrics"]
+        metrics_logger.set_final(
+            val_acc=val_m.get("eval_accuracy"),
+            val_f1=val_m.get("eval_macro_f1"),
+            test_acc=test_m.get("eval_accuracy"),
+            test_f1=test_m.get("eval_macro_f1"),
+        )
+        print(f"Final val accuracy:  {val_m.get('eval_accuracy')}")
+        print(f"Final test accuracy: {test_m.get('eval_accuracy')}")
 
 
 if __name__ == "__main__":

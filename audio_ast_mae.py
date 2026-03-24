@@ -2,11 +2,10 @@
 """
 MAE-style pretraining for AST-shaped audio spectrogram transformers.
 
-This script pretrains epoch-by-epoch and evaluates representation quality at
-epochs 15 and 30 via:
-- zero-shot KNN
-- t-SNE / PCA grouped plots
-- temporary ESC-50 finetuning from the current backbone
+Pre-trains for --pretrain_epochs epochs, evaluating KNN at epochs 15 and 30,
+then runs a single --finetune_epochs supervised finetune from the pre-trained
+backbone. All metrics are written to {output_dir}/metrics.json and per-epoch
+finetune logs are available in {output_dir}/final_finetune/trainer_state.json.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ import argparse
 import copy
 from pathlib import Path
 
-import numpy as np
 import torch
 from safetensors.torch import load_file
 from torch.utils.data import ConcatDataset, random_split
@@ -29,6 +27,7 @@ from common.lib import (
     percent_trained,
     seed_everything,
 )
+from common.metrics_logger import MetricsLogger
 from evaluation.embedding_eval import evaluate_embedding_snapshots
 from models.audio_common import (
     AST_MODEL_NAME,
@@ -55,9 +54,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--audioset_dir", type=str, default="data/audioset_5000")
     parser.add_argument("--model_name", type=str, default=AST_MODEL_NAME)
-    parser.add_argument("--output_dir", type=str, default="data/audio_ast_mae_runs")
-    parser.add_argument("--pretrain_epochs", type=int, default=20)
-    parser.add_argument("--finetune_epochs", type=int, default=15)
+    parser.add_argument("--output_dir", type=str, default="data/runs/mae")
+    parser.add_argument("--pretrain_epochs", type=int, default=30)
+    parser.add_argument("--finetune_epochs", type=int, default=45)
     parser.add_argument("--pretrain_batch_size", type=int, default=8)
     parser.add_argument("--finetune_batch_size", type=int, default=8)
     parser.add_argument("--pretrain_lr", type=float, default=1e-4)
@@ -76,10 +75,10 @@ def main() -> None:
     parser.add_argument("--balance_target_size", type=int, default=None)
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--esc50_only_pretrain", action="store_true")
-    parser.add_argument("--run_final_finetune", action="store_true")
     args = parser.parse_args()
 
     seed_everything(SEED)
+    metrics_logger = MetricsLogger(args.output_dir)
 
     transform = LogMelPadCrop(
         sample_rate=args.sample_rate,
@@ -90,7 +89,6 @@ def main() -> None:
     )
 
     datasets = []
-    audioset_files = []
     if args.esc50_only_pretrain:
         print("ESC50-only pretraining enabled, skipping AudioSet source.")
     else:
@@ -99,7 +97,7 @@ def main() -> None:
             datasets.append(FolderAudioPretrainDataset(audioset_files, transform))
             print(f"Found {len(audioset_files)} audio files in {args.audioset_dir}")
         else:
-            print(f"No audio files found in {args.audioset_dir}, skipping that source.")
+            print(f"No audio files found in {args.audioset_dir}, skipping.")
 
     esc50_data = AudioLoader(args).load()
     esc50_waveforms = esc50_data["X_train"]
@@ -110,7 +108,7 @@ def main() -> None:
             transform=transform,
         )
     )
-    print(f"Loaded {len(esc50_waveforms)} ESC-50 train clips from AudioLoader.")
+    print(f"Loaded {len(esc50_waveforms)} ESC-50 train clips for pre-training.")
 
     if not datasets:
         raise RuntimeError("No audio sources available for pretraining.")
@@ -149,6 +147,7 @@ def main() -> None:
         source_rate=ESC50_AUDIO_RATE,
         transform=transform,
     )
+    idx2cls = {i: label for i, label in enumerate(finetune_data["label_names"])}
 
     config = AutoConfig.from_pretrained(args.model_name)
     mae_model = AudioASTMAE(
@@ -164,67 +163,50 @@ def main() -> None:
         load_checkpoint_into_model(mae_model, args.checkpoint)
         print(f"Loaded model from checkpoint: {args.checkpoint}")
 
-    idx2cls = {i: label for i, label in enumerate(finetune_data["label_names"])}
-
-    initial_dir = Path(args.output_dir) / "epoch_0"
+    # Initial KNN before any training
     initial_snapshot = evaluate_embedding_snapshots(
         backbone=mae_model.clone_backbone(),
         train_dataset=embedding_train_dataset,
         y_train=finetune_data["y_train"],
         test_dataset=embedding_test_dataset,
         y_test=finetune_data["y_test"],
-        output_dir=initial_dir,
+        output_dir=Path(args.output_dir) / "epoch_0",
         idx2cls=idx2cls,
         batch_size=max(args.pretrain_batch_size, args.finetune_batch_size),
+        skip_viz=True,
     )
+    metrics_logger.set("initial_knn_acc", initial_snapshot["knn_accuracy"])
     print(f"Initial KNN accuracy: {initial_snapshot['knn_accuracy']:.4f}")
 
     def evaluate_epoch(model, epoch: int) -> None:
-        epoch_dir = Path(args.output_dir) / f"epoch_{epoch}"
-        backbone = model.clone_backbone()
+        """KNN-only milestone evaluation during pre-training."""
         snapshot = evaluate_embedding_snapshots(
-            backbone=backbone,
+            backbone=model.clone_backbone(),
             train_dataset=embedding_train_dataset,
             y_train=finetune_data["y_train"],
             test_dataset=embedding_test_dataset,
             y_test=finetune_data["y_test"],
-            output_dir=epoch_dir,
+            output_dir=Path(args.output_dir) / f"epoch_{epoch}",
             idx2cls=idx2cls,
             batch_size=max(args.pretrain_batch_size, args.finetune_batch_size),
+            skip_viz=True,
         )
+        metrics_logger.set_milestone(epoch=epoch, knn_acc=snapshot["knn_accuracy"])
         print(f"Epoch {epoch} KNN accuracy: {snapshot['knn_accuracy']:.4f}")
 
-        finetune_args = make_training_args(
-            output_dir=str(epoch_dir),
-            epochs=args.finetune_epochs,
-            batch_size=args.finetune_batch_size,
-            lr=args.finetune_lr,
+    # Pre-training
+    if args.pretrain_epochs > 0:
+        pretrain_args = make_training_args(
+            output_dir=str(Path(args.output_dir) / "pretrain"),
+            epochs=args.pretrain_epochs,
+            batch_size=args.pretrain_batch_size,
+            lr=args.pretrain_lr,
             seed=SEED,
         )
-        finetune_args.metric_for_best_model = "macro_f1"
-        finetune_args.greater_is_better = True
-        metrics = run_finetune(
-            backbone=backbone,
-            esc50_data=finetune_data,
-            training_args=finetune_args,
-            transform=transform,
-            output_dir=epoch_dir,
-        )
-        print(f"Epoch {epoch} finetune validation metrics: {metrics['val_metrics']}")
-        print(f"Epoch {epoch} finetune test metrics: {metrics['test_metrics']}")
+        pretrain_args.metric_for_best_model = "eval_loss"
+        pretrain_args.greater_is_better = False
+        pretrain_args.weight_decay = args.weight_decay
 
-    pretrain_args = make_training_args(
-        output_dir=str(Path(args.output_dir) / "pretrain"),
-        epochs=args.pretrain_epochs,
-        batch_size=args.pretrain_batch_size,
-        lr=args.pretrain_lr,
-        seed=SEED,
-    )
-    pretrain_args.metric_for_best_model = "eval_loss"
-    pretrain_args.greater_is_better = False
-    pretrain_args.weight_decay = args.weight_decay
-
-    if args.pretrain_epochs > 0:
         run_pretrain_loop(
             model=mae_model,
             train_dataset=pretrain_train_dataset,
@@ -234,7 +216,8 @@ def main() -> None:
             eval_callback=evaluate_epoch,
         )
 
-    if args.run_final_finetune and args.finetune_epochs > 0:
+    # Final supervised fine-tune (single run, full budget)
+    if args.finetune_epochs > 0:
         final_dir = Path(args.output_dir) / "final_finetune"
         final_args = make_training_args(
             output_dir=str(final_dir),
@@ -243,17 +226,26 @@ def main() -> None:
             lr=args.finetune_lr,
             seed=SEED,
         )
-        final_args.metric_for_best_model = "macro_f1"
-        final_args.greater_is_better = True
-        metrics = run_finetune(
+        final_args.metric_for_best_model = "eval_loss"
+        final_args.greater_is_better = False
+
+        result = run_finetune(
             backbone=mae_model.clone_backbone(),
             esc50_data=finetune_data,
             training_args=final_args,
             transform=transform,
             output_dir=final_dir,
         )
-        print(f"Final finetune validation metrics: {metrics['val_metrics']}")
-        print(f"Final finetune test metrics: {metrics['test_metrics']}")
+        val_m = result["val_metrics"]
+        test_m = result["test_metrics"]
+        metrics_logger.set_final(
+            val_acc=val_m.get("eval_accuracy"),
+            val_f1=val_m.get("eval_macro_f1"),
+            test_acc=test_m.get("eval_accuracy"),
+            test_f1=test_m.get("eval_macro_f1"),
+        )
+        print(f"Final val accuracy:  {val_m.get('eval_accuracy')}")
+        print(f"Final test accuracy: {test_m.get('eval_accuracy')}")
 
 
 if __name__ == "__main__":

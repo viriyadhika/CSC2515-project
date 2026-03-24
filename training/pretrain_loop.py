@@ -7,7 +7,6 @@ from pathlib import Path
 import numpy as np
 import torch
 from safetensors.torch import load_file
-from sklearn.metrics import classification_report, confusion_matrix
 from transformers import Trainer, TrainerCallback
 
 from common.dataloader import ESC50_AUDIO_RATE
@@ -80,7 +79,6 @@ def run_finetune(
     y_train = esc50_data["y_train"]
     y_valid = esc50_data["y_valid"]
     y_test = esc50_data["y_test"]
-    label_names = esc50_data["label_names"]
     n_classes = int(esc50_data["n_classes"])
 
     train_dataset = WaveformArrayClassificationDataset(
@@ -127,45 +125,9 @@ def run_finetune(
     val_metrics = trainer.evaluate()
     test_metrics = trainer.evaluate(eval_dataset=test_dataset)
 
-    pred_output = trainer.predict(test_dataset)
-    y_pred = np.argmax(pred_output.predictions, axis=1)
-    y_true = pred_output.label_ids
-    label_ids = list(range(n_classes))
-    report = classification_report(
-        y_true,
-        y_pred,
-        labels=label_ids,
-        target_names=label_names,
-        zero_division=0,
-    )
-    matrix = confusion_matrix(y_true, y_pred, labels=label_ids)
-
-    metrics_path = Path(output_dir) / "finetune_metrics.txt"
-    metrics_path.parent.mkdir(parents=True, exist_ok=True)
-    metrics_path.write_text(
-        "\n".join(
-            [
-                "Validation metrics:",
-                str(val_metrics),
-                "",
-                "Test metrics:",
-                str(test_metrics),
-                "",
-                "Classification report:",
-                report,
-                "",
-                "Confusion matrix:",
-                np.array2string(matrix),
-            ]
-        )
-        + "\n"
-    )
-
     return {
         "val_metrics": val_metrics,
         "test_metrics": test_metrics,
-        "classification_report": report,
-        "confusion_matrix": matrix,
     }
 
 

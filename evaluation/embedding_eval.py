@@ -93,6 +93,7 @@ def evaluate_embedding_snapshots(
     idx2cls: dict[int, str],
     batch_size: int = 32,
     input_key: str = "x",
+    skip_viz: bool = False,
 ):
     epoch_dir = Path(output_dir)
     epoch_dir.mkdir(parents=True, exist_ok=True)
@@ -113,23 +114,24 @@ def evaluate_embedding_snapshots(
     knn_acc = run_knn_eval(emb_train, y_train, emb_test, y_test)
     (epoch_dir / "knn_results.txt").write_text(f"knn_accuracy: {knn_acc:.6f}\n")
 
-    tsne_embeddings = run_tsne(emb_test)
-    plot_embeddings(
-        tsne_embeddings,
-        y_test,
-        method="tsne",
-        output_dir=epoch_dir / "tsne",
-        idx2cls=idx2cls,
-    )
+    if not skip_viz:
+        tsne_embeddings = run_tsne(emb_test)
+        plot_embeddings(
+            tsne_embeddings,
+            y_test,
+            method="tsne",
+            output_dir=epoch_dir / "tsne",
+            idx2cls=idx2cls,
+        )
 
-    pca_embeddings = run_pca(emb_test)
-    plot_embeddings(
-        pca_embeddings,
-        y_test,
-        method="pca",
-        output_dir=epoch_dir / "pca",
-        idx2cls=idx2cls,
-    )
+        pca_embeddings = run_pca(emb_test)
+        plot_embeddings(
+            pca_embeddings,
+            y_test,
+            method="pca",
+            output_dir=epoch_dir / "pca",
+            idx2cls=idx2cls,
+        )
 
     return {
         "knn_accuracy": knn_acc,
