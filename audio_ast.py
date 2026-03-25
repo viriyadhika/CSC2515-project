@@ -28,7 +28,7 @@ from common.dataloader import AudioLoader
 from common.lib import SEED, compute_metrics, make_training_args, percent_trained, seed_everything
 from common.metrics_logger import MetricsLogger
 from evaluation.embedding_eval import evaluate_embedding_snapshots
-from training.pretrain_loop import EVAL_EPOCHS
+from training.pretrain_loop import EVAL_EPOCHS, FreezeBackboneCallback, _DifferentialLRTrainer
 
 
 AST_MODEL_NAME = "Simon-Kotchou/ssast-small-patch-audioset-16-16"
@@ -248,15 +248,24 @@ def main():
     # For supervised runs we don't need to checkpoint every epoch
     training_args.save_strategy = "no"
     training_args.load_best_model_at_end = False
+    training_args.max_grad_norm = 1.0
 
-    trainer = Trainer(
+    freeze_backbone_epochs = max(1, int(0.2 * args.epochs))
+    trainer = _DifferentialLRTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=valid_dataset,
         data_collator=ast_collator,
         compute_metrics=compute_metrics,
-        callbacks=[milestone_cb],
+        callbacks=[milestone_cb, FreezeBackboneCallback(
+            freeze_backbone_epochs,
+            backbone_attr="audio_spectrogram_transformer",
+        )],
+        backbone_lr=1e-5,
+        head_lr=1e-4,
+        backbone_attr="audio_spectrogram_transformer",
+        head_attr="classifier",
     )
     milestone_cb.trainer = trainer  # needed for potential future use
     trainer.train()

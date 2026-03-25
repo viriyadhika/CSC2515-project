@@ -62,12 +62,67 @@ class CollapseLoggingCallback(TrainerCallback):
             f.write(f"epoch={epoch},mean_feature_std={mean_std:.6f}\n")
 
 
+class _DifferentialLRTrainer(Trainer):
+    """Trainer with separate learning rates for backbone and head."""
+
+    def __init__(
+        self,
+        *args,
+        backbone_lr: float,
+        head_lr: float,
+        backbone_attr: str = "backbone",
+        head_attr: str = "head",
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._backbone_lr = backbone_lr
+        self._head_lr = head_lr
+        self._backbone_attr = backbone_attr
+        self._head_attr = head_attr
+
+    def create_optimizer(self):
+        backbone_params = list(getattr(self.model, self._backbone_attr).parameters())
+        head_params = list(getattr(self.model, self._head_attr).parameters())
+        self.optimizer = torch.optim.AdamW(
+            [
+                {"params": backbone_params, "lr": self._backbone_lr},
+                {"params": head_params, "lr": self._head_lr},
+            ],
+            weight_decay=self.args.weight_decay,
+        )
+        return self.optimizer
+
+
+class FreezeBackboneCallback(TrainerCallback):
+    """Freezes the backbone for the first `freeze_epochs` epochs, then releases it."""
+
+    def __init__(self, freeze_epochs: int, backbone_attr: str = "backbone"):
+        self.freeze_epochs = freeze_epochs
+        self.backbone_attr = backbone_attr
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        if self.freeze_epochs > 0 and model is not None:
+            for p in getattr(model, self.backbone_attr).parameters():
+                p.requires_grad_(False)
+            print(f"{self.backbone_attr} frozen for first {self.freeze_epochs} epochs.")
+
+    def on_epoch_end(self, args, state, control, model=None, **kwargs):
+        epoch = int(round(state.epoch))
+        if epoch == self.freeze_epochs and model is not None:
+            for p in getattr(model, self.backbone_attr).parameters():
+                p.requires_grad_(True)
+            print(f"{self.backbone_attr} unfrozen at epoch {epoch}.")
+
+
 def run_finetune(
     backbone,
     esc50_data,
     training_args,
     transform,
     output_dir,
+    backbone_lr: float | None = None,
+    head_lr: float | None = None,
+    freeze_backbone_epochs: int = 0,
 ):
     finetune_args = copy.deepcopy(training_args)
     finetune_args.output_dir = str(output_dir)
@@ -109,13 +164,26 @@ def run_finetune(
         class_weights=class_weights,
     )
 
-    trainer = Trainer(
+    callbacks = []
+    if freeze_backbone_epochs > 0:
+        callbacks.append(FreezeBackboneCallback(freeze_backbone_epochs))
+
+    trainer_cls = Trainer
+    trainer_kwargs = {}
+    if backbone_lr is not None and head_lr is not None:
+        trainer_cls = _DifferentialLRTrainer
+        trainer_kwargs = {"backbone_lr": backbone_lr, "head_lr": head_lr,
+                          "backbone_attr": "backbone", "head_attr": "head"}
+
+    trainer = trainer_cls(
         model=clf_model,
         args=finetune_args,
         train_dataset=train_dataset,
         eval_dataset=valid_dataset,
         data_collator=cls_collator,
         compute_metrics=compute_metrics,
+        callbacks=callbacks or None,
+        **trainer_kwargs,
     )
 
     if finetune_args.num_train_epochs > 0:

@@ -236,13 +236,18 @@ def main() -> None:
         )
         final_args.metric_for_best_model = "eval_loss"
         final_args.greater_is_better = False
+        final_args.max_grad_norm = 1.0
 
+        freeze_backbone_epochs = max(1, int(0.2 * args.finetune_epochs))
         result = run_finetune(
             backbone=mae_model.clone_backbone(),
             esc50_data=finetune_data,
             training_args=final_args,
             transform=transform,
             output_dir=final_dir,
+            backbone_lr=1e-5,
+            head_lr=1e-4,
+            freeze_backbone_epochs=freeze_backbone_epochs,
         )
         val_m = result["val_metrics"]
         test_m = result["test_metrics"]
