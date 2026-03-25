@@ -248,8 +248,8 @@ if all(r is not None for r in src_rows):
 
     # Left: classification accuracy
     ax = axes[0]
-    ep15_accs = [r["ep15_test"] for r in src_rows]
-    final_accs = [r["final_test"] for r in src_rows]
+    ep15_accs = [r["ep15_test"] or 0 for r in src_rows]
+    final_accs = [r["final_test"] or 0 for r in src_rows]
     b1 = ax.bar(x - w/2, ep15_accs, width=w, color=METHOD_COLOR["MAE"], label="Epoch-15")
     b2 = ax.bar(x + w/2, final_accs, width=w, color=METHOD_COLOR["MAE"],
                 alpha=0.55, hatch="//", label="Final")
@@ -266,9 +266,9 @@ if all(r is not None for r in src_rows):
 
     # Right: KNN accuracy
     ax = axes[1]
-    init_knns = [r["initial_knn"] for r in src_rows]
-    ep15_knns = [r["ep15_knn"] for r in src_rows]
-    ep30_knns = [r["ep30_knn"] for r in src_rows]
+    init_knns = [r["initial_knn"] or 0 for r in src_rows]
+    ep15_knns = [r["ep15_knn"] or 0 for r in src_rows]
+    ep30_knns = [r["ep30_knn"] or 0 for r in src_rows]
     b1 = ax.bar(x - w, init_knns, width=w, color=METHOD_COLOR["MAE"], alpha=0.35, label="Initial KNN")
     b2 = ax.bar(x,     ep15_knns, width=w, color=METHOD_COLOR["MAE"], label="Epoch-15 KNN")
     b3 = ax.bar(x + w, ep30_knns, width=w, color=METHOD_COLOR["MAE"],

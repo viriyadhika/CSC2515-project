@@ -36,8 +36,8 @@ STYLES = {
 
 # Each entry: label → path to trainer_state.json
 RUNS = {
-    "MAE":        BASE / "mae"        / "final_finetune" / "trainer_state.json",
-    "DINO":       BASE / "dino"       / "final_finetune" / "trainer_state.json",
+    "MAE":        BASE / "mae"        / "final_finetune" / "checkpoint-6750" / "trainer_state.json",
+    "DINO":       BASE / "dino"       / "final_finetune" / "checkpoint-6750" / "trainer_state.json",
     "Pretrained": BASE / "pretrained" / "trainer"        / "trainer_state.json",
     "Scratch":    BASE / "scratch"    / "trainer"        / "trainer_state.json",
 }

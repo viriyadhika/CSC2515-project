@@ -260,6 +260,7 @@ def main():
     )
     milestone_cb.trainer = trainer  # needed for potential future use
     trainer.train()
+    trainer.save_state()  # write trainer_state.json for training curves
 
     # Final metrics
     val_m = trainer.evaluate()
