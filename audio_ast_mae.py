@@ -42,6 +42,69 @@ from novel.mae_lib import mae_collator
 from training.pretrain_loop import run_finetune, run_pretrain_loop
 
 
+def log_pipeline_stats(mae_model, dataset, n_samples: int = 16) -> None:
+    """Sanity-check data normalization and model internals before training."""
+    from torch.utils.data import DataLoader
+
+    loader = DataLoader(
+        dataset, batch_size=n_samples, shuffle=True, collate_fn=mae_collator
+    )
+    batch = next(iter(loader))
+    x = batch["x"]
+
+    def _fmt(t):
+        return (
+            f"mean={t.mean():.4f}  std={t.std():.4f}"
+            f"  min={t.min():.4f}  max={t.max():.4f}"
+            f"  nan={t.isnan().any().item()}  inf={t.isinf().any().item()}"
+        )
+
+    print("\n========== PIPELINE SANITY CHECK ==========")
+
+    print(f"\n[Input spectrogram]  shape={tuple(x.shape)}")
+    print(f"  {_fmt(x)}")
+    print(f"  Note: normalization is (x - dataset_mean) / (dataset_std * 2).")
+    print(f"  Expected: mean≈0, std≈0.5")
+
+    device = next(mae_model.parameters()).device
+    x = x.to(device)
+    mae_model.eval()
+
+    with torch.no_grad():
+        tokens = mae_model.tokenize(x)
+        print(f"\n[Token embeddings]  shape={tuple(tokens.shape)}")
+        print(f"  {_fmt(tokens)}")
+
+        latent, target, mask, ids_restore = mae_model.forward_encoder(x)
+        print(f"\n[Encoder latent]  shape={tuple(latent.shape)}")
+        print(f"  {_fmt(latent)}")
+        print(f"  Note: low std (<<1) suggests representation collapse.")
+
+        print(f"\n[Patch targets (patchified spectrogram)]  shape={tuple(target.shape)}")
+        print(f"  {_fmt(target)}")
+
+        pred = mae_model.forward_decoder(latent, ids_restore)
+        print(f"\n[Decoder predictions]  shape={tuple(pred.shape)}")
+        print(f"  {_fmt(pred)}")
+
+        mask_ratio = mask.float().mean().item()
+        out = mae_model(x=x)
+        loss = out["loss"]
+        masked_mse = ((pred - target) ** 2 * mask.unsqueeze(-1)).sum() / (
+            mask.sum() * target.shape[-1]
+        )
+        print(f"\n[MAE loss]")
+        print(f"  total loss:       {loss.item():.6f}")
+        print(f"  masked patch MSE: {masked_mse.item():.6f}")
+        print(f"  mask ratio:       {mask_ratio:.3f}")
+        print(
+            f"  Note: a random-init baseline MSE ≈ target.var() = {target.var().item():.6f}"
+        )
+
+    mae_model.train()
+    print("============================================\n")
+
+
 def load_checkpoint_into_model(model, checkpoint_path: str) -> None:
     path = Path(checkpoint_path)
     if path.is_dir():
@@ -170,6 +233,8 @@ def main() -> None:
     if args.checkpoint is not None:
         load_checkpoint_into_model(mae_model, args.checkpoint)
         print(f"Loaded model from checkpoint: {args.checkpoint}")
+
+    log_pipeline_stats(mae_model, pretrain_train_dataset)
 
     # Initial KNN before any training
     initial_snapshot = evaluate_embedding_snapshots(
