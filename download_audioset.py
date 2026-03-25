@@ -7,9 +7,9 @@ import glob
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 CSV_FILE = "data/balanced_train_segments.csv"
-OUTPUT_DIR = "data/audioset_5000"
-TARGET_CLIPS = 5000
-MAX_WORKERS = 8
+OUTPUT_DIR = "data/audioset_20000"
+TARGET_CLIPS = 20000
+MAX_WORKERS = 4
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -38,21 +38,20 @@ def download_clip(ytid, start, end, output_path):
     template = f"{ytid}_{int(start)}.%(ext)s"
 
     # download audio using yt_dlp
-    subprocess.run(
+    result = subprocess.run(
         [
             sys.executable,
             "-m",
             "yt_dlp",
             "-f",
             "bestaudio",
-            "--quiet",
             "--no-warnings",
             "-o",
             template,
             url
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        capture_output=True,
+        text=True
     )
 
     files = glob.glob(f"{ytid}_{int(start)}.*")
