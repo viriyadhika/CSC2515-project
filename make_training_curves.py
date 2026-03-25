@@ -38,6 +38,7 @@ STYLES = {
 RUNS = {
     "MAE":        BASE / "mae"        / "final_finetune" / "checkpoint-6750" / "trainer_state.json",
     "DINO":       BASE / "dino"       / "final_finetune" / "checkpoint-6750" / "trainer_state.json",
+    "MAE ESC-50 Only":       BASE / "mae_esc50_only"       / "final_finetune" / "checkpoint-6750" / "trainer_state.json",
     "Pretrained": BASE / "pretrained" / "trainer"        / "trainer_state.json",
     "Scratch":    BASE / "scratch"    / "trainer"        / "trainer_state.json",
 }

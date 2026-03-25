@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from safetensors.torch import load_file
 from transformers import Trainer, TrainerCallback
 
 from common.dataloader import ESC50_AUDIO_RATE
@@ -147,13 +146,6 @@ def run_pretrain_loop(
     output_path = Path(training_args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    if checkpoint is not None:
-        if checkpoint.endswith(".safetensors"):
-            state_dict = load_file(checkpoint)
-        else:
-            state_dict = torch.load(checkpoint, map_location="cpu")
-        model.load_state_dict(state_dict)
-
     callbacks = [MilestoneEvalCallback(eval_callback=eval_callback)]
     if collapse_dataset is not None and collapse_backbone_getter is not None:
         callbacks.append(
@@ -175,5 +167,5 @@ def run_pretrain_loop(
         data_collator=collator,
         callbacks=callbacks,
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=checkpoint)
     return trainer

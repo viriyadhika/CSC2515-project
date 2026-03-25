@@ -42,6 +42,15 @@ from training.pretrain_loop import run_finetune, run_pretrain_loop
 
 
 def load_checkpoint_into_model(model, checkpoint_path: str) -> None:
+    from pathlib import Path
+    path = Path(checkpoint_path)
+    if path.is_dir():
+        if (path / "model.safetensors").exists():
+            checkpoint_path = str(path / "model.safetensors")
+        elif (path / "pytorch_model.bin").exists():
+            checkpoint_path = str(path / "pytorch_model.bin")
+        else:
+            raise FileNotFoundError(f"No model file found in {path}")
     if checkpoint_path.endswith(".safetensors"):
         from safetensors.torch import load_file
         state_dict = load_file(checkpoint_path)
@@ -81,7 +90,7 @@ class AudioDINOPretrainDataset(torch.utils.data.Dataset):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--audioset_dir", type=str, default="data/audioset_5000")
+    parser.add_argument("--audioset_dir", type=str, default="data/audioset_20000")
     parser.add_argument("--model_name", type=str, default=AST_MODEL_NAME)
     parser.add_argument("--output_dir", type=str, default="data/runs/dino")
     parser.add_argument("--teacher_momentum", type=float, default=0.996)
