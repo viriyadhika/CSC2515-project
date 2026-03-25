@@ -42,6 +42,61 @@ from novel.mae_lib import mae_collator
 from training.pretrain_loop import run_finetune, run_pretrain_loop
 
 
+def estimate_dataset_stats(
+    transform: LogMelPadCrop,
+    esc50_waveforms,
+    esc50_rate: int,
+    audioset_files: list,
+    n_samples_each: int = 300,
+) -> None:
+    """Estimate global mean/std from a combined sample of both datasets.
+
+    Uses a neutral transform (no normalization) to get raw dB spectrogram values,
+    then prints the combined stats to use as --dataset_mean / --dataset_std.
+    """
+    import random as _random
+
+    raw_transform = LogMelPadCrop(
+        sample_rate=transform.sample_rate,
+        n_mels=transform.melspec.n_mels,
+        target_length=transform.target_length,
+        dataset_mean=0.0,
+        dataset_std=0.5,  # (x - 0) / (0.5 * 2) = x, so output == raw dB values
+    )
+
+    specs = []
+
+    # ESC-50 samples
+    esc_indices = _random.sample(range(len(esc50_waveforms)), min(n_samples_each, len(esc50_waveforms)))
+    for i in esc_indices:
+        w = torch.tensor(esc50_waveforms[i], dtype=torch.float32)
+        specs.append(raw_transform(w, esc50_rate))
+
+    # AudioSet samples
+    if audioset_files:
+        import torchaudio
+        as_files = _random.sample(audioset_files, min(n_samples_each, len(audioset_files)))
+        for path in as_files:
+            try:
+                w, sr = torchaudio.load(path)
+                specs.append(raw_transform(w, sr))
+            except Exception:
+                pass
+
+    all_specs = torch.stack(specs)
+    actual_mean = all_specs.mean().item()
+    actual_std = all_specs.std().item()
+
+    n_esc = len(esc_indices)
+    n_as = len(audioset_files) and min(n_samples_each, len(audioset_files))
+    print(f"\n[Dataset stats estimate: {n_esc} ESC-50 + {n_as} AudioSet samples]")
+    print(f"  mean = {actual_mean:.4f}   (pass as --dataset_mean)")
+    print(f"  std  = {actual_std:.4f}   (pass as --dataset_std)")
+    print(f"  Current args: dataset_mean={transform.dataset_mean}, dataset_std={transform.dataset_std}")
+    if abs(actual_mean - transform.dataset_mean) > 1.0 or abs(actual_std - transform.dataset_std) > 1.0:
+        print(f"  WARNING: current stats differ significantly from actual data — normalization is off.")
+
+
 def log_pipeline_stats(mae_model, dataset, n_samples: int = 16) -> None:
     """Sanity-check data normalization and model internals before training."""
     from torch.utils.data import DataLoader
@@ -172,6 +227,7 @@ def main() -> None:
 
     esc50_data = AudioLoader(args).load()
     esc50_waveforms = esc50_data["X_train"]
+    estimate_dataset_stats(transform, esc50_waveforms, ESC50_AUDIO_RATE, audioset_files)
     datasets.append(
         WaveformArrayPretrainDataset(
             esc50_waveforms,
