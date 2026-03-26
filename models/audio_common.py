@@ -48,11 +48,13 @@ class LogMelPadCrop:
         win_length: int = 400,
         hop_length: int = 160,
         target_length: int = 1024,
-        dataset_mean: float = -4.2677393,
-        dataset_std: float = 4.5689974,
+        top_db: float | None = 80.0,
+        dataset_mean: float | None = None,
+        dataset_std: float | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.target_length = target_length
+        self.top_db = top_db
         self.dataset_mean = dataset_mean
         self.dataset_std = dataset_std
 
@@ -65,9 +67,12 @@ class LogMelPadCrop:
             center=True,
             power=2.0,
         )
-        self.amplitude_to_db = torchaudio.transforms.AmplitudeToDB(stype="power")
+        self.amplitude_to_db = torchaudio.transforms.AmplitudeToDB(
+            stype="power", top_db=top_db
+        )
 
-    def __call__(self, waveform: torch.Tensor, sr: int) -> torch.Tensor:
+    def _to_raw_db(self, waveform: torch.Tensor, sr: int) -> torch.Tensor:
+        """Compute log-mel spectrogram without normalization."""
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0)
         if waveform.dim() == 2:
@@ -81,14 +86,65 @@ class LogMelPadCrop:
 
         t, _ = spec.shape
         if t < self.target_length:
-            pad = self.target_length - t
-            spec = torch.nn.functional.pad(spec, (0, 0, 0, pad))
+            spec = torch.nn.functional.pad(spec, (0, 0, 0, self.target_length - t))
         elif t > self.target_length:
             start = random.randint(0, t - self.target_length)
             spec = spec[start : start + self.target_length]
 
-        spec = (spec - self.dataset_mean) / (self.dataset_std * 2.0)
         return spec
+
+    def fit(
+        self,
+        waveforms: np.ndarray | None = None,
+        source_rate: int | None = None,
+        audio_files: list[str] | None = None,
+        n_samples: int = 500,
+    ) -> "LogMelPadCrop":
+        """Estimate dataset_mean and dataset_std from a sample of the data.
+
+        Pass waveforms (numpy array) for in-memory sources and/or audio_files
+        (list of paths) for on-disk sources. Samples up to n_samples from each.
+        """
+        specs = []
+
+        if waveforms is not None and source_rate is not None:
+            indices = random.sample(range(len(waveforms)), min(n_samples, len(waveforms)))
+            for i in indices:
+                w = torch.tensor(waveforms[i], dtype=torch.float32)
+                specs.append(self._to_raw_db(w, source_rate))
+
+        if audio_files:
+            sampled = random.sample(audio_files, min(n_samples, len(audio_files)))
+            for path in sampled:
+                try:
+                    w, sr = torchaudio.load(path)
+                    specs.append(self._to_raw_db(w, sr))
+                except Exception:
+                    pass
+
+        if not specs:
+            raise RuntimeError(
+                "LogMelPadCrop.fit() received no data. "
+                "Pass waveforms= or audio_files=."
+            )
+
+        stacked = torch.stack(specs)
+        self.dataset_mean = stacked.mean().item()
+        self.dataset_std = stacked.std().item()
+        print(
+            f"LogMelPadCrop stats from {len(specs)} samples: "
+            f"mean={self.dataset_mean:.4f}, std={self.dataset_std:.4f}"
+        )
+        return self
+
+    def __call__(self, waveform: torch.Tensor, sr: int) -> torch.Tensor:
+        if self.dataset_mean is None or self.dataset_std is None:
+            raise RuntimeError(
+                "LogMelPadCrop has no normalization stats. "
+                "Call .fit() or pass dataset_mean and dataset_std to __init__."
+            )
+        spec = self._to_raw_db(waveform, sr)
+        return (spec - self.dataset_mean) / (self.dataset_std * 2.0)
 
 
 class FolderAudioPretrainDataset(torch.utils.data.Dataset):

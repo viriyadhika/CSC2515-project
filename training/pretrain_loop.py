@@ -18,7 +18,7 @@ from novel.dino_utils import compute_feature_std
 from novel.mae_lib import cls_collator
 
 
-EVAL_EPOCHS = [15, 30]
+EVAL_EPOCHS = [15, 30, 45]
 
 
 class MilestoneEvalCallback(TrainerCallback):

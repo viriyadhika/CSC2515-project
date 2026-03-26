@@ -42,59 +42,6 @@ from novel.mae_lib import mae_collator
 from training.pretrain_loop import run_finetune, run_pretrain_loop
 
 
-def estimate_dataset_stats(
-    transform: LogMelPadCrop,
-    esc50_waveforms,
-    esc50_rate: int,
-    audioset_files: list,
-    n_samples_each: int = 300,
-) -> None:
-    """Estimate global mean/std from a combined sample of both datasets.
-
-    Uses a neutral transform (no normalization) to get raw dB spectrogram values,
-    then prints the combined stats to use as --dataset_mean / --dataset_std.
-    """
-    import random as _random
-
-    raw_transform = LogMelPadCrop(
-        sample_rate=transform.sample_rate,
-        n_mels=transform.melspec.n_mels,
-        target_length=transform.target_length,
-        dataset_mean=0.0,
-        dataset_std=0.5,  # (x - 0) / (0.5 * 2) = x, so output == raw dB values
-    )
-
-    specs = []
-
-    # ESC-50 samples
-    esc_indices = _random.sample(range(len(esc50_waveforms)), min(n_samples_each, len(esc50_waveforms)))
-    for i in esc_indices:
-        w = torch.tensor(esc50_waveforms[i], dtype=torch.float32)
-        specs.append(raw_transform(w, esc50_rate))
-
-    # AudioSet samples
-    if audioset_files:
-        import torchaudio
-        as_files = _random.sample(audioset_files, min(n_samples_each, len(audioset_files)))
-        for path in as_files:
-            try:
-                w, sr = torchaudio.load(path)
-                specs.append(raw_transform(w, sr))
-            except Exception:
-                pass
-
-    all_specs = torch.stack(specs)
-    actual_mean = all_specs.mean().item()
-    actual_std = all_specs.std().item()
-
-    n_esc = len(esc_indices)
-    n_as = len(audioset_files) and min(n_samples_each, len(audioset_files))
-    print(f"\n[Dataset stats estimate: {n_esc} ESC-50 + {n_as} AudioSet samples]")
-    print(f"  mean = {actual_mean:.4f}   (pass as --dataset_mean)")
-    print(f"  std  = {actual_std:.4f}   (pass as --dataset_std)")
-    print(f"  Current args: dataset_mean={transform.dataset_mean}, dataset_std={transform.dataset_std}")
-    if abs(actual_mean - transform.dataset_mean) > 1.0 or abs(actual_std - transform.dataset_std) > 1.0:
-        print(f"  WARNING: current stats differ significantly from actual data — normalization is off.")
 
 
 def log_pipeline_stats(mae_model, dataset, n_samples: int = 16) -> None:
@@ -191,8 +138,8 @@ def main() -> None:
     parser.add_argument("--num_mel_bins", type=int, default=128)
     parser.add_argument("--target_length", type=int, default=1024)
     parser.add_argument("--sample_rate", type=int, default=16000)
-    parser.add_argument("--dataset_mean", type=float, default=-4.2677393)
-    parser.add_argument("--dataset_std", type=float, default=4.5689974)
+    parser.add_argument("--dataset_mean", type=float, default=None, help="Override computed mean")
+    parser.add_argument("--dataset_std", type=float, default=None, help="Override computed std")
     parser.add_argument("--fshape", type=int, default=16)
     parser.add_argument("--tshape", type=int, default=16)
     parser.add_argument("--mask_patch", type=int, default=100)
@@ -206,36 +153,58 @@ def main() -> None:
     seed_everything(SEED)
     metrics_logger = MetricsLogger(args.output_dir)
 
-    transform = LogMelPadCrop(
-        sample_rate=args.sample_rate,
-        n_mels=args.num_mel_bins,
-        target_length=args.target_length,
-        dataset_mean=args.dataset_mean,
-        dataset_std=args.dataset_std,
-    )
-
-    datasets = []
+    # 1. Discover data sources before building the transform so we can fit stats.
+    audioset_files: list[str] = []
     if args.esc50_only_pretrain:
         print("ESC50-only pretraining enabled, skipping AudioSet source.")
     else:
         audioset_files = find_audio_files(args.audioset_dir)
         if audioset_files:
-            datasets.append(FolderAudioPretrainDataset(audioset_files, transform))
             print(f"Found {len(audioset_files)} audio files in {args.audioset_dir}")
         else:
             print(f"No audio files found in {args.audioset_dir}, skipping.")
 
     esc50_data = AudioLoader(args).load()
     esc50_waveforms = esc50_data["X_train"]
-    estimate_dataset_stats(transform, esc50_waveforms, ESC50_AUDIO_RATE, audioset_files)
+    print(f"Loaded {len(esc50_waveforms)} ESC-50 train clips for pre-training.")
+
+    # 2. Build transforms: one fitted on the full pretraining corpus (ESC-50 +
+    #    AudioSet) for pretraining, and one fitted on ESC-50 only for finetuning.
+    #    This mirrors the SSAST paper, which uses separate normalization stats for
+    #    the pretraining dataset and each downstream dataset.
+    def _make_transform(mean=None, std=None):
+        return LogMelPadCrop(
+            sample_rate=args.sample_rate,
+            n_mels=args.num_mel_bins,
+            target_length=args.target_length,
+            dataset_mean=mean,
+            dataset_std=std,
+        )
+
+    if args.dataset_mean is not None and args.dataset_std is not None:
+        pretrain_transform = _make_transform(args.dataset_mean, args.dataset_std)
+        finetune_transform = _make_transform(args.dataset_mean, args.dataset_std)
+    else:
+        pretrain_transform = _make_transform()
+        pretrain_transform.fit(
+            waveforms=esc50_waveforms,
+            source_rate=ESC50_AUDIO_RATE,
+            audio_files=audioset_files or None,
+        )
+        finetune_transform = _make_transform()
+        finetune_transform.fit(waveforms=esc50_waveforms, source_rate=ESC50_AUDIO_RATE)
+
+    # 3. Build datasets with the fitted transforms.
+    datasets = []
+    if audioset_files:
+        datasets.append(FolderAudioPretrainDataset(audioset_files, pretrain_transform))
     datasets.append(
         WaveformArrayPretrainDataset(
             esc50_waveforms,
             source_rate=ESC50_AUDIO_RATE,
-            transform=transform,
+            transform=pretrain_transform,
         )
     )
-    print(f"Loaded {len(esc50_waveforms)} ESC-50 train clips for pre-training.")
 
     if not datasets:
         raise RuntimeError("No audio sources available for pretraining.")
@@ -266,13 +235,13 @@ def main() -> None:
         finetune_data["X_train"],
         finetune_data["y_train"],
         source_rate=ESC50_AUDIO_RATE,
-        transform=transform,
+        transform=finetune_transform,
     )
     embedding_test_dataset = WaveformArrayClassificationDataset(
         finetune_data["X_test"],
         finetune_data["y_test"],
         source_rate=ESC50_AUDIO_RATE,
-        transform=transform,
+        transform=finetune_transform,
     )
     idx2cls = {i: label for i, label in enumerate(finetune_data["label_names"])}
 
@@ -364,7 +333,7 @@ def main() -> None:
             backbone=mae_model.clone_backbone(),
             esc50_data=finetune_data,
             training_args=final_args,
-            transform=transform,
+            transform=finetune_transform,
             output_dir=final_dir,
             backbone_lr=1e-5,
             head_lr=1e-4,

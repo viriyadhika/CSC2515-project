@@ -103,19 +103,27 @@ class AudioASTDINO(nn.Module):
         if x1 is None or x2 is None:
             raise ValueError("AudioASTDINO expects x1 and x2")
 
-        student_feat = self.student_backbone(x1)
-        student_out = self.student_head(student_feat)
+        student_feat1 = self.student_backbone(x1)
+        student_out1 = self.student_head(student_feat1)
+        student_feat2 = self.student_backbone(x2)
+        student_out2 = self.student_head(student_feat2)
 
         with torch.no_grad():
-            teacher_feat = self.teacher_backbone(x2)
-            teacher_out = self.teacher_head(teacher_feat)
+            teacher_feat1 = self.teacher_backbone(x1)
+            teacher_out1 = self.teacher_head(teacher_feat1)
+            teacher_feat2 = self.teacher_backbone(x2)
+            teacher_out2 = self.teacher_head(teacher_feat2)
 
-        loss = self.dino_loss(student_out, teacher_out)
+        loss = 0.5 * (
+            self.dino_loss(student_out1, teacher_out2)
+            + self.dino_loss(student_out2, teacher_out1)
+        )
 
-        with torch.no_grad():
-            self.update_center(teacher_out)
+        if self.training:
+            with torch.no_grad():
+                self.update_center(torch.cat([teacher_out1, teacher_out2], dim=0))
 
-        return {"loss": loss, "logits": student_out}
+        return {"loss": loss, "logits": student_out1}
 
     def clone_backbone(self) -> nn.Module:
         return copy.deepcopy(self.student_backbone.model)

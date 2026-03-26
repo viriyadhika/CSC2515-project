@@ -105,8 +105,8 @@ def main():
     parser.add_argument("--num_mel_bins", type=int, default=128)
     parser.add_argument("--target_length", type=int, default=1024)
     parser.add_argument("--sample_rate", type=int, default=16000)
-    parser.add_argument("--dataset_mean", type=float, default=-4.2677393)
-    parser.add_argument("--dataset_std", type=float, default=4.5689974)
+    parser.add_argument("--dataset_mean", type=float, default=None, help="Override computed mean")
+    parser.add_argument("--dataset_std", type=float, default=None, help="Override computed std")
     parser.add_argument("--percent_train", type=float, default=100.0)
     parser.add_argument("--balance_target_size", type=int, default=None)
     parser.add_argument("--checkpoint", type=str, default=None)
@@ -115,32 +115,54 @@ def main():
     seed_everything(SEED)
     metrics_logger = MetricsLogger(args.output_dir)
 
-    transform = LogMelPadCrop(
-        sample_rate=args.sample_rate,
-        n_mels=args.num_mel_bins,
-        target_length=args.target_length,
-        dataset_mean=args.dataset_mean,
-        dataset_std=args.dataset_std,
-    )
-
-    datasets = []
+    # 1. Discover data sources before building the transform so we can fit stats.
     audioset_files = find_audio_files(args.audioset_dir)
     if audioset_files:
-        datasets.append(FolderAudioPretrainDataset(audioset_files, transform))
         print(f"Found {len(audioset_files)} audio files in {args.audioset_dir}")
     else:
         print(f"No audio files found in {args.audioset_dir}, skipping.")
 
     esc50_data = AudioLoader(args).load()
     esc50_waveforms = esc50_data["X_train"]
+    print(f"Loaded {len(esc50_waveforms)} ESC-50 train clips for pre-training.")
+
+    # 2. Build transforms: one fitted on the full pretraining corpus (ESC-50 +
+    #    AudioSet) for pretraining, and one fitted on ESC-50 only for finetuning.
+    #    This mirrors the SSAST paper, which uses separate normalization stats for
+    #    the pretraining dataset and each downstream dataset.
+    def _make_transform(mean=None, std=None):
+        return LogMelPadCrop(
+            sample_rate=args.sample_rate,
+            n_mels=args.num_mel_bins,
+            target_length=args.target_length,
+            dataset_mean=mean,
+            dataset_std=std,
+        )
+
+    if args.dataset_mean is not None and args.dataset_std is not None:
+        pretrain_transform = _make_transform(args.dataset_mean, args.dataset_std)
+        finetune_transform = _make_transform(args.dataset_mean, args.dataset_std)
+    else:
+        pretrain_transform = _make_transform()
+        pretrain_transform.fit(
+            waveforms=esc50_waveforms,
+            source_rate=ESC50_AUDIO_RATE,
+            audio_files=audioset_files or None,
+        )
+        finetune_transform = _make_transform()
+        finetune_transform.fit(waveforms=esc50_waveforms, source_rate=ESC50_AUDIO_RATE)
+
+    # 3. Build datasets with the fitted transforms.
+    datasets = []
+    if audioset_files:
+        datasets.append(FolderAudioPretrainDataset(audioset_files, pretrain_transform))
     datasets.append(
         WaveformArrayPretrainDataset(
             esc50_waveforms,
             source_rate=ESC50_AUDIO_RATE,
-            transform=transform,
+            transform=pretrain_transform,
         )
     )
-    print(f"Loaded {len(esc50_waveforms)} ESC-50 train clips for pre-training.")
 
     full_dataset = ConcatDataset(datasets)
     valid_size = max(1, int(0.1 * len(full_dataset)))
@@ -170,13 +192,13 @@ def main():
         finetune_data["X_train"],
         finetune_data["y_train"],
         source_rate=ESC50_AUDIO_RATE,
-        transform=transform,
+        transform=finetune_transform,
     )
     embedding_test_dataset = WaveformArrayClassificationDataset(
         finetune_data["X_test"],
         finetune_data["y_test"],
         source_rate=ESC50_AUDIO_RATE,
-        transform=transform,
+        transform=finetune_transform,
     )
     idx2cls = {i: label for i, label in enumerate(finetune_data["label_names"])}
 
@@ -260,7 +282,7 @@ def main():
             backbone=dino_model.clone_backbone(),
             esc50_data=finetune_data,
             training_args=final_args,
-            transform=transform,
+            transform=finetune_transform,
             output_dir=final_dir,
             backbone_lr=1e-5,
             head_lr=1e-4,
