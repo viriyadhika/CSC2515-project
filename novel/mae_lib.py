@@ -33,7 +33,7 @@ class ECGMAEDataset(Dataset):
 
 def mae_collator(features: List[Dict]):
     x = torch.stack([f["x"] for f in features])
-    return {"x": x}
+    return {"x": x, "labels": x}
 
 
 def cls_collator(features: List[Dict]):
