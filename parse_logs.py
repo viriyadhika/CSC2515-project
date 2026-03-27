@@ -27,7 +27,7 @@ EXPERIMENTS = [
         "finetune_epochs": 45,
         "pretrain_data": "AudioSet+ESC50",
         "percent_train": 100,
-        "output_dir": "data/runs/mae",
+        "output_dir": "data/runs/mae_big_preprocess",
     },
     {
         "experiment": "MAE (ESC50-only)",
