@@ -17,3 +17,9 @@ python3 audio_ast_dino.py \
   --output_dir data/runs/dino_big \
   --pretrain_epochs 45 \
   --finetune_epochs 45
+
+python3 audio_ast_mae.py \
+  --output_dir data/runs/mae_esc50_preprocess \
+  --esc50_only_pretrain \
+  --pretrain_epochs 45 \
+  --finetune_epochs 45

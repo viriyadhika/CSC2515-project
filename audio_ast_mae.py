@@ -142,7 +142,7 @@ def main() -> None:
     parser.add_argument("--dataset_std", type=float, default=None, help="Override computed std")
     parser.add_argument("--fshape", type=int, default=16)
     parser.add_argument("--tshape", type=int, default=16)
-    parser.add_argument("--mask_patch", type=int, default=100)
+    parser.add_argument("--mask_patch", type=int, default=250)
     parser.add_argument("--decoder_dim", type=int, default=256)
     parser.add_argument("--percent_train", type=float, default=100.0)
     parser.add_argument("--balance_target_size", type=int, default=None)
