@@ -108,7 +108,9 @@ def main():
     parser.add_argument("--audioset_dir", type=str, default="data/audioset_20000")
     parser.add_argument("--model_name", type=str, default=AST_MODEL_NAME)
     parser.add_argument("--output_dir", type=str, default="data/runs/dino")
-    parser.add_argument("--teacher_momentum", type=float, default=0.996)
+    parser.add_argument("--teacher_momentum", type=float, default=0.99)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8,
+                        help="Accumulate gradients over N steps; effective batch = batch_size * N")
     parser.add_argument("--teacher_temp", type=float, default=0.04)
     parser.add_argument("--student_temp", type=float, default=0.1)
     parser.add_argument("--out_dim", type=int, default=256)
@@ -274,6 +276,7 @@ def main():
     pretrain_args.load_best_model_at_end = False
     pretrain_args.metric_for_best_model = None
     pretrain_args.weight_decay = args.weight_decay
+    pretrain_args.gradient_accumulation_steps = args.gradient_accumulation_steps
 
     run_pretrain_loop(
         model=dino_model,
