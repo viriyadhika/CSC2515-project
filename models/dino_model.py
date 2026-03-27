@@ -50,9 +50,17 @@ class AudioASTBackbone(nn.Module):
 
 
 class AudioASTDINO(nn.Module):
-    def __init__(self, config, out_dim: int = 256):
+    def __init__(
+        self,
+        config,
+        out_dim: int = 256,
+        teacher_temp: float = 0.04,
+        student_temp: float = 0.1,
+    ):
         super().__init__()
         self.base_config = config
+        self.teacher_temp = teacher_temp
+        self.student_temp = student_temp
 
         self.student_backbone = AudioASTBackbone(config)
         self.student_head = DINOHead(self.student_backbone.hidden_size, out_dim=out_dim)
@@ -88,11 +96,9 @@ class AudioASTDINO(nn.Module):
         self,
         student_out: torch.Tensor,
         teacher_out: torch.Tensor,
-        student_temp: float = 0.1,
-        teacher_temp: float = 0.04,
     ) -> torch.Tensor:
-        student_logp = F.log_softmax(student_out / student_temp, dim=-1)
-        teacher_prob = F.softmax((teacher_out.detach() - self.center) / teacher_temp, dim=-1)
+        student_logp = F.log_softmax(student_out / self.student_temp, dim=-1)
+        teacher_prob = F.softmax((teacher_out.detach() - self.center) / self.teacher_temp, dim=-1)
         return torch.sum(-teacher_prob * student_logp, dim=-1).mean()
 
     def forward(self, x1=None, x2=None, **kwargs):

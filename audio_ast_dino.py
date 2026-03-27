@@ -60,8 +60,9 @@ def load_checkpoint_into_model(model, checkpoint_path: str) -> None:
 
 
 class AudioDINOPretrainDataset(torch.utils.data.Dataset):
-    def __init__(self, base_dataset):
+    def __init__(self, base_dataset, asymmetric: bool = False):
         self.base_dataset = base_dataset
+        self.asymmetric = asymmetric
 
     def __len__(self) -> int:
         return len(self.base_dataset)
@@ -83,8 +84,22 @@ class AudioDINOPretrainDataset(torch.utils.data.Dataset):
                 x[start : start + width] = 0.0
         return x
 
+    def augment_strong(self, x: torch.Tensor) -> torch.Tensor:
+        """Heavy time masking for student view (DINOSR-inspired).
+        Masks ~50% of time frames in 3 contiguous blocks."""
+        x = x.clone()
+        total_time = x.shape[0]
+        mask_width = total_time // 6
+        for _ in range(3):
+            start = int(torch.randint(0, max(1, total_time - mask_width + 1), (1,)).item())
+            x[start : start + mask_width] = 0.0
+        return x
+
     def __getitem__(self, idx: int):
         x = self.base_dataset[idx]["x"]
+        if self.asymmetric:
+            # Student sees heavily masked view, teacher sees clean original
+            return {"x1": self.augment_strong(x), "x2": x.clone()}
         return {"x1": self.augment(x), "x2": self.augment(x)}
 
 
@@ -94,7 +109,11 @@ def main():
     parser.add_argument("--model_name", type=str, default=AST_MODEL_NAME)
     parser.add_argument("--output_dir", type=str, default="data/runs/dino")
     parser.add_argument("--teacher_momentum", type=float, default=0.996)
+    parser.add_argument("--teacher_temp", type=float, default=0.04)
+    parser.add_argument("--student_temp", type=float, default=0.1)
     parser.add_argument("--out_dim", type=int, default=256)
+    parser.add_argument("--asymmetric_aug", action="store_true",
+                        help="Student sees heavily masked spectrogram, teacher sees clean (DINOSR-inspired)")
     parser.add_argument("--pretrain_epochs", type=int, default=30)
     parser.add_argument("--finetune_epochs", type=int, default=45)
     parser.add_argument("--pretrain_batch_size", type=int, default=8)
@@ -172,8 +191,8 @@ def main():
         [train_size, valid_size],
         generator=torch.Generator().manual_seed(SEED),
     )
-    dino_train_dataset = AudioDINOPretrainDataset(base_train_dataset)
-    dino_valid_dataset = AudioDINOPretrainDataset(base_valid_dataset)
+    dino_train_dataset = AudioDINOPretrainDataset(base_train_dataset, asymmetric=args.asymmetric_aug)
+    dino_valid_dataset = AudioDINOPretrainDataset(base_valid_dataset, asymmetric=args.asymmetric_aug)
 
     finetune_data = copy.deepcopy(esc50_data)
     x_train, y_train = percent_trained(finetune_data["X_train"], finetune_data["y_train"], args)
@@ -203,7 +222,12 @@ def main():
     idx2cls = {i: label for i, label in enumerate(finetune_data["label_names"])}
 
     config = AutoConfig.from_pretrained(args.model_name)
-    dino_model = AudioASTDINO(config=config, out_dim=args.out_dim)
+    dino_model = AudioASTDINO(
+        config=config,
+        out_dim=args.out_dim,
+        teacher_temp=args.teacher_temp,
+        student_temp=args.student_temp,
+    )
     if args.checkpoint is not None:
         load_checkpoint_into_model(dino_model, args.checkpoint)
         print(f"Loaded model from checkpoint: {args.checkpoint}")
