@@ -36,7 +36,7 @@ EXPERIMENTS = [
         "finetune_epochs": 45,
         "pretrain_data": "ESC50-only",
         "percent_train": 100,
-        "output_dir": "data/runs/mae_esc50_only",
+        "output_dir": "data/runs/mae_esc50_preprocess",
     },
     {
         "experiment": "DINO (AudioSet+ESC50)",
@@ -72,7 +72,16 @@ EXPERIMENTS = [
         "finetune_epochs": 45,
         "pretrain_data": "AudioSet+ESC50",
         "percent_train": 25,
-        "output_dir": "data/runs/mae_pct25",
+        "output_dir": "data/runs/mae_25_pct",
+    },
+    {
+        "experiment": "MAE (50% labels)",
+        "method": "MAE",
+        "pretrain_epochs": 30,
+        "finetune_epochs": 45,
+        "pretrain_data": "AudioSet+ESC50",
+        "percent_train": 50,
+        "output_dir": "data/runs/mae_50_pct",
     },
     {
         "experiment": "Scratch (25% labels)",
@@ -82,6 +91,42 @@ EXPERIMENTS = [
         "pretrain_data": "N/A",
         "percent_train": 25,
         "output_dir": "data/runs/scratch_pct25",
+    },
+    {
+        "experiment": "Scratch (50% labels)",
+        "method": "Scratch",
+        "pretrain_epochs": 0,
+        "finetune_epochs": 45,
+        "pretrain_data": "N/A",
+        "percent_train": 50,
+        "output_dir": "data/runs/scratch_50_pct",
+    },
+    {
+        "experiment": "DINO (batch=64, out=256)",
+        "method": "DINO",
+        "pretrain_epochs": 30,
+        "finetune_epochs": 45,
+        "pretrain_data": "AudioSet+ESC50",
+        "percent_train": 100,
+        "output_dir": "data/runs/dino_r2_exp1_accum",
+    },
+    {
+        "experiment": "DINO (batch=64, out=1024, temp=0.07)",
+        "method": "DINO",
+        "pretrain_epochs": 30,
+        "finetune_epochs": 45,
+        "pretrain_data": "AudioSet+ESC50",
+        "percent_train": 100,
+        "output_dir": "data/runs/dino_r2_exp2_accum_1024_t07",
+    },
+    {
+        "experiment": "DINO (batch=64, asymmetric aug)",
+        "method": "DINO",
+        "pretrain_epochs": 30,
+        "finetune_epochs": 45,
+        "pretrain_data": "AudioSet+ESC50",
+        "percent_train": 100,
+        "output_dir": "data/runs/dino_r2_exp3_accum_asymmetric",
     },
 ]
 
@@ -99,6 +144,7 @@ METRIC_COLS = [
     "initial_knn_acc",
     "milestone_15_knn_acc",
     "milestone_30_knn_acc",
+    "milestone_45_knn_acc",
     "milestone_15_val_acc",
     "milestone_15_val_f1",
     "milestone_15_test_acc",
@@ -132,13 +178,14 @@ def extract_row(exp: dict) -> dict:
     row["initial_knn_acc"] = _fmt(m.get("initial_knn_acc"))
 
     milestones = m.get("milestones", {})
-    for ep in (15, 30):
+    for ep in (15, 30, 45):
         ms = milestones.get(str(ep), {})
         row[f"milestone_{ep}_knn_acc"] = _fmt(ms.get("knn_acc"))
-        row[f"milestone_{ep}_val_acc"] = _fmt(ms.get("val_acc"))
-        row[f"milestone_{ep}_val_f1"] = _fmt(ms.get("val_f1"))
-        row[f"milestone_{ep}_test_acc"] = _fmt(ms.get("test_acc"))
-        row[f"milestone_{ep}_test_f1"] = _fmt(ms.get("test_f1"))
+        if ep != 45:
+            row[f"milestone_{ep}_val_acc"] = _fmt(ms.get("val_acc"))
+            row[f"milestone_{ep}_val_f1"] = _fmt(ms.get("val_f1"))
+            row[f"milestone_{ep}_test_acc"] = _fmt(ms.get("test_acc"))
+            row[f"milestone_{ep}_test_f1"] = _fmt(ms.get("test_f1"))
 
     final = m.get("final", {})
     row["final_val_acc"] = _fmt(final.get("val_acc"))
@@ -167,7 +214,7 @@ print(f"Written {len(rows)} rows to {out_path}")
 
 key_cols = [
     "experiment", "method", "pretrain_epochs", "finetune_epochs", "percent_train",
-    "initial_knn_acc", "milestone_15_knn_acc", "milestone_30_knn_acc",
+    "initial_knn_acc", "milestone_15_knn_acc", "milestone_30_knn_acc", "milestone_45_knn_acc",
     "milestone_15_test_acc", "milestone_30_test_acc",
     "final_test_acc", "final_test_f1",
 ]
