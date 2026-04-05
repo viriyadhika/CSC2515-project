@@ -66,7 +66,6 @@ def best_test(r):
 MAIN_EXPS = [
     ("Pretrained\nAST",    "Pretrained AST"),
     ("MAE\n(AudioSet)",    "MAE (AudioSet+ESC50)"),
-    ("MAE\n(ESC50-only)",  "MAE (ESC50-only)"),
     ("DINO",               "DINO (AudioSet+ESC50)"),
     ("Scratch\nAST",       "Scratch AST"),
 ]
